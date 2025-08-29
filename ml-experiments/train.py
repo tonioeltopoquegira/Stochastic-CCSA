@@ -11,7 +11,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 
-from models import MNIST_CNN, resnet32, resnet56, TinyViT
+from models import MNIST_CNN, resnet32, resnet56
 from utils import set_seed, get_loaders, train_epoch, evaluate
 from optimizers import CCSAOptimizer
 
