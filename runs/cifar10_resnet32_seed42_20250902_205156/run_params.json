@@ -1,0 +1,21 @@
+{
+  "exp": "cifar10_resnet32",
+  "dataset": "cifar10",
+  "opt": "ccsa",
+  "plot_eval_limit": null,
+  "epochs": 15,
+  "batch_size": 32,
+  "lr": 0.001,
+  "weight_decay": 0.0,
+  "inner_gradients": 0,
+  "always_improve": 0,
+  "sigma_min": 0.001,
+  "maxeval": 1000000.0,
+  "max_inner_eval": null,
+  "verbose": false,
+  "device": null,
+  "seed": 42,
+  "outdir": "./runs",
+  "num_workers": 4,
+  "plot_ylim": null
+}
