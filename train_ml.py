@@ -13,7 +13,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 
-from models import MNIST_CNN, resnet32, resnet56
+from class_models import MNIST_CNN, resnet32, resnet56
 from utils import set_seed, get_loaders, train_epoch, evaluate
 from optimizers import CCSAOptimizer
 
@@ -30,7 +30,6 @@ def get_model_for_exp(exp):
         raise ValueError(f"Unknown experiment: {exp}")
 
 
-# --- in your main training script ---
 def run(args):
     set_seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -98,7 +97,6 @@ def run(args):
                     cumulative_eval += e
                     all_evals.append(cumulative_eval)
 
-                # full-pass evals on train & val each epoch
                 train_eval_loss, train_eval_acc = evaluate(model, train_loader, criterion, device)
                 val_eval_loss, val_eval_acc = evaluate(model, test_loader, criterion, device)
 
@@ -115,14 +113,14 @@ def run(args):
                     f"val_eval_loss={val_eval_loss:.4f} val_eval_acc={val_eval_acc:.4f}"
                 )
         else:
-            # NEW: CCSA now returns (losses, evals, logs) with per-epoch evals
+
             all_batch_losses, all_evals, logs = optimizer.optimize_training(
                 train_loader, model, criterion, device, args.epochs, test_loader=test_loader
             )
 
         all_results[opt_name] = (all_batch_losses, all_evals, logs)
 
-    # --------- SAVE ALL ARRAYS ----------
+    # Save the results
     save_dict = {}
     serializable_logs = {}
     for opt_name, (losses, evals, logs) in all_results.items():
@@ -147,7 +145,7 @@ def run(args):
 
     print(f"[INFO] Saved results to {outdir}")
 
-    # Combined plotting (unchanged)
+    # Combined plotting
     plt.figure(figsize=(8, 4))
     for opt_name, (losses, evals, _) in all_results.items():
         x = np.array(evals, dtype=np.float32)
@@ -174,7 +172,6 @@ if __name__ == "__main__":
     p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist"], default="cifar10")
     p.add_argument("--opt", choices=["adam", "adamw", "ccsa"])
     p.add_argument("--plot-eval-limit", type=float, default=None)
-
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-size", type=int, dest="batch_size", default=128)
     p.add_argument("--lr", type=float, default=1e-3)

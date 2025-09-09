@@ -10,15 +10,20 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 
-# Seed
+
+import pickle
+import matplotlib.pyplot as plt
+from typing import Optional, Dict, Any
+
+# Setting the seed
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
-# Experiments data loaders
-def get_loaders(exp, batch_size=128, num_workers=4, pin_memory=False, dataset_for_vit="cifar10"):
+# Experiments data loaders and standard transformations
+def get_loaders(exp, batch_size=128, num_workers=4, pin_memory=False):
     if exp == "mnist_cnn":
         tr = transforms.Compose([transforms.RandomRotation(10), transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         te = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
@@ -47,7 +52,6 @@ def get_loaders(exp, batch_size=128, num_workers=4, pin_memory=False, dataset_fo
         return train_loader, test_loader
     
     if exp == "mnist_vae":
-        # no normalization -> pixels in [0,1]
         tr = transforms.Compose([transforms.ToTensor()])
         te = transforms.Compose([transforms.ToTensor()])
         train = datasets.MNIST("./data", train=True, download=True, transform=tr)
@@ -57,18 +61,14 @@ def get_loaders(exp, batch_size=128, num_workers=4, pin_memory=False, dataset_fo
         return train_loader, test_loader
 
     elif exp == "cifar10_vae":
-        # Filter CIFAR10 to use only images of a single class (class_idx)
+        # Filter CIFAR10 to use only images of the 0 class 
         tr = transforms.Compose([transforms.ToTensor()])
         te = transforms.Compose([transforms.ToTensor()])
         full_train = datasets.CIFAR10("./data", train=True, download=True, transform=tr)
         full_test  = datasets.CIFAR10("./data", train=False, transform=te)
 
-        # create subsets where target == class_idx
-        train_idx = [i for i, (_, t) in enumerate(full_train) if t == int(class_idx)]
-        test_idx = [i for i, (_, t) in enumerate(full_test) if t == int(class_idx)]
-
-        if len(train_idx) == 0 or len(test_idx) == 0:
-            raise ValueError(f"No examples found for class_idx={class_idx} in CIFAR10")
+        train_idx = [i for i, (_, t) in enumerate(full_train) if t == 0]
+        test_idx = [i for i, (_, t) in enumerate(full_test) if t == 0]
 
         train = Subset(full_train, train_idx)
         test = Subset(full_test, test_idx)
@@ -79,7 +79,7 @@ def get_loaders(exp, batch_size=128, num_workers=4, pin_memory=False, dataset_fo
     else:
         raise ValueError("Unknown experiment key")
 
-
+# Training epoch for classification models
 def train_epoch(model, loader, optimizer, criterion, device, show_progress=False, desc=""):
     model.train()
     total_loss, correct, n = 0.0, 0, 0
@@ -108,7 +108,7 @@ def train_epoch(model, loader, optimizer, criterion, device, show_progress=False
 
     return total_loss / n, correct / n, batch_losses, batch_evals
 
-
+# Evaluation for classification models
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
     model.eval()
@@ -122,15 +122,59 @@ def evaluate(model, loader, criterion, device):
         n += data.size(0)
     return total_loss / n, correct / n
 
+# Train epoch for baseline for VAE
+def train_epoch_vae(model, loader, optimizer, device, beta=1.0, show_progress=False, desc=""):
+    model.train()
+    batch_losses = []
+    batch_recons = []
+    batch_kls = []
+    batch_evals = []
+
+    iterator = loader
+    for batch in iterator:
+        if isinstance(batch, (list, tuple)):
+            x = batch[0].to(device)
+        else:
+            x = batch.to(device)
+
+        optimizer.zero_grad()
+        recon, mu, logvar = model(x)
+        recon_loss, kl_loss = model.loss_components(recon, x, mu, logvar, reduction='mean')
+        total_loss = recon_loss + beta * kl_loss
+        total_loss.backward()
+        optimizer.step()
+
+        batch_losses.append(float(total_loss.item()))
+        batch_recons.append(float(recon_loss.item()))
+        batch_kls.append(float(kl_loss.item()))
+        batch_evals.append(1.0)
+
+    epoch_total = float(np.mean(batch_losses)) if batch_losses else None
+    epoch_recon = float(np.mean(batch_recons)) if batch_recons else None
+    epoch_kl = float(np.mean(batch_kls)) if batch_kls else None
+
+    return epoch_total, epoch_recon, epoch_kl, batch_losses, batch_recons, batch_kls, batch_evals
+
+# Evaluate baseline for VAE
+@torch.no_grad()
+def evaluate_vae(model, loader, device, beta=1.0):
+    model.eval()
+    totals, recons, kls = [], [], []
+    for batch in loader:
+        if isinstance(batch, (list, tuple)):
+            x = batch[0].to(device)
+        else:
+            x = batch.to(device)
+        recon, mu, logvar = model(x)
+        recon_loss, kl_loss = model.loss_components(recon, x, mu, logvar, reduction='mean')
+        totals.append(float((recon_loss + beta * kl_loss).item()))
+        recons.append(float(recon_loss.item()))
+        kls.append(float(kl_loss.item()))
+    if not totals:
+        return None, None, None
+    return float(np.mean(totals)), float(np.mean(recons)), float(np.mean(kls))
 
 
-
-import numpy as np
-import json
-import pickle
-import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Optional, Dict, Any
 
 
 def postprocess_losses(
@@ -151,15 +195,9 @@ def postprocess_losses(
     optimizers: Optional[list] = None,
     special_both: Optional[list] = None,
 ) -> Dict[str, Any]:
-    """
-    Load and plot optimizer losses for multiple run directories.
-
-    Args:
-        runs: dict {label: run_dir_path}, e.g. {"Adam": "runs/adam", "SGD": "runs/sgd"}
-    """
-
+    
     def load_results_from_folder(folder: Path) -> Dict[str, Any]:
-        """Helper to load results from results.npz, logs.json, or all_results.pkl"""
+        
         results_npz = folder / "results.npz"
         logs_json = folder / "logs.json"
         all_results_pkl = folder / "all_results.pkl"
@@ -189,7 +227,7 @@ def postprocess_losses(
                 print(f"[WARN] Failed to load {all_results_pkl}: {e}")
                 all_results = {}
 
-        # Reconstruct if pickle missing
+        
         if not all_results:
             losses_keys = [k for k in loaded.keys() if isinstance(k, str) and k.endswith("_losses")]
             for lk in losses_keys:
@@ -205,7 +243,7 @@ def postprocess_losses(
                     logs = loaded["logs_json"][opt_name]
                 all_results[opt_name] = (losses.tolist(), evals.tolist(), logs)
 
-        # Normalize arrays
+        
         for k, v in list(all_results.items()):
             losses, evals, logs = v
             losses = np.array(losses, dtype=np.float32)
@@ -217,7 +255,7 @@ def postprocess_losses(
         return all_results
 
    
-    # --- Load all runs ---
+    # Load all the runs
     all_results = {}
     for run_name, run_path in runs.items():
         run_path = Path(run_path)
@@ -227,28 +265,28 @@ def postprocess_losses(
         run_results = load_results_from_folder(run_path)
 
         if optimizers is None:
-            # Default rules with special-both exceptions
+            
             opt_keys = list(run_results.keys())
             has_ccsa = any("ccsa" in k.lower() for k in opt_keys)
             has_adam = any("adam" in k.lower() for k in opt_keys)
 
             if has_ccsa and has_adam:
                 if special_both and run_name in special_both:
-                    # Keep both optimizers
+                    
                     for opt_name, v in run_results.items():
                         if "ccsa" in opt_name.lower() or "adam" in opt_name.lower():
                             all_results[f"{run_name}_{opt_name}"] = v
                 else:
-                    # Default: prefer only CCSA
+                    
                     for opt_name, v in run_results.items():
                         if "ccsa" in opt_name.lower():
                             all_results[f"{run_name}_{opt_name}"] = v
             else:
-                # If only one optimizer exists, keep it
+                
                 for opt_name, v in run_results.items():
                     all_results[f"{run_name}_{opt_name}"] = v
         else:
-            # Explicit filter from user
+            
             allowed_opts = {o.lower() for o in optimizers}
             for opt_name, v in run_results.items():
                 if any(o in opt_name.lower() for o in allowed_opts):
@@ -256,7 +294,7 @@ def postprocess_losses(
 
     
 
-    # --- Shared budget ---
+    
     max_evals_per_opt = {name: float(evals.max()) if evals.size > 0 else 0.0
                          for name, (_, evals, _) in all_results.items()}
     if x_limit is not None:
@@ -266,11 +304,12 @@ def postprocess_losses(
     else:
         shared_budget = float(min(max_evals_per_opt.values()))
 
-    # --- Color map ---
+    
     opt_names = sorted(all_results.keys())
     if color_map is None:
+        # good for colorblind people
         okabe_ito = [
-            "#0072B2", "#E69F00", "#009E73", "#D55E00",
+        "#0072B2", "#E69F00", "#009E73", "#D55E00",
             "#CC79A7", "#F0E442", "#56B4E9", "#000000"
         ]
         extra = [("#%02x%02x%02x" % (int(r*255), int(g*255), int(b*255)))
@@ -292,7 +331,7 @@ def postprocess_losses(
             lw = 1.4
         return color, ls, lw
 
-    # --- Collect y-limits ---
+   
     collected_losses = []
     for _, (losses, evals, _) in all_results.items():
         mask = evals <= shared_budget
@@ -314,7 +353,7 @@ def postprocess_losses(
     if plot_ylim is not None:
         y_max = plot_ylim
 
-    # --- Plot ---
+    
     fig, ax = plt.subplots(figsize=figsize)
     summary = {"shared_budget": shared_budget, "per_optimizer": {}}
 
@@ -332,7 +371,7 @@ def postprocess_losses(
             x = evals[mask]
             y = losses[mask]
 
-        # Extend to shared_budget
+        
         if x.size > 1 and x[-1] < shared_budget:
             y_at_budget = float(np.interp(shared_budget, evals, losses))
             x = np.concatenate([x, [shared_budget]])
@@ -342,7 +381,7 @@ def postprocess_losses(
             x = np.array([x[0], shared_budget], dtype=float)
             y = np.array([y[0], y_at_budget], dtype=float)
 
-        # ↓↓↓ NEW: subsample for plotting
+        
         if plot_every > 1 and x.size > plot_every:
             x = x[::plot_every]
             y = y[::plot_every]
@@ -351,7 +390,7 @@ def postprocess_losses(
         ax.plot(x, y, label=opt_name.upper(), color=color, linestyle=ls,
                 linewidth=lw, marker=marker_symbol, markersize=5)
 
-        # Metrics (always computed on full data, not subsampled)
+        
         full_evals, full_losses = evals, losses
         if full_losses.size > 0:
             idx_best = int(np.nanargmin(full_losses))
@@ -475,55 +514,36 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Postprocess and plot optimizer losses for multiple runs")
 
     # runs
-    p.add_argument("--runs", type=str, nargs="+", required=True,
-                   help="Run directories to include, format: name=path. "
-                        "Example: --runs adam=./runs/adam_seed0 sgd=./runs/sgd_run")
+    p.add_argument("--runs", type=str, nargs="+", required=True)
 
     # x / y limits and budget
-    p.add_argument("--plot-eval-limit", type=float, default=None, help="Legacy eval limit (kept for compatibility)")
-    p.add_argument("--x-limit", type=float, default=None, help="Explicit x-axis cumulative-eval limit (overrides plot-eval-limit)")
-    p.add_argument("--plot-ylim", type=float, default=None, help="Optional y-axis top limit")
+    p.add_argument("--plot-eval-limit", type=float, default=None)
+    p.add_argument("--x-limit", type=float, default=None)
+    p.add_argument("--plot-ylim", type=float, default=None)
 
     # figure / output options
-    p.add_argument("--no-save-fig", action="store_true", help="Do not save the produced figure")
-    p.add_argument("--show-fig", action="store_true", help="Show the figure (useful in interactive sessions)")
-    p.add_argument("--out-suffix", type=str, default=None, help="Suffix appended to the saved figure filename")
+    p.add_argument("--no-save-fig", action="store_true")
+    p.add_argument("--show-fig", action="store_true")
+    p.add_argument("--out-suffix", type=str, default=None)
 
     # plotting style
-    p.add_argument("--markers", action="store_true", help="Show markers on plotted lines")
-    p.add_argument("--log-x", action="store_true", help="Plot x axis in log scale (requires positive x values)")
-    p.add_argument("--log-y", action="store_true", help="Plot y axis in log scale (requires positive y values)")
-    p.add_argument("--legend-loc", type=str, default="best", help="Legend location (matplotlib loc string)")
+    p.add_argument("--markers", action="store_true")
+    p.add_argument("--log-x", action="store_true")
+    p.add_argument("--log-y", action="store_true")
+    p.add_argument("--legend-loc", type=str, default="best")
 
     # colors and sizing
-    p.add_argument("--color-map", type=str, default=None,
-                   help="JSON string or path to JSON file mapping optimizer_name->hex color. "
-                        "Example JSON string: '{\"adam\":\"#ff0000\",\"ccsa\":\"#00ff00\"}'")
-    p.add_argument("--figsize", type=str, default=None,
-                   help="Figure size as two comma-separated floats, e.g. 9,4.8. If omitted uses default in function.")
-    p.add_argument("--plot-every", type=int, default=1,
-               help="Subsample factor: plot every Nth point (default=1 → plot all points)")
-    p.add_argument(
-    "--optimizers",
-    type=str,
-    default=None,
-    help="Comma-separated list of optimizers to include. "
-         "Default: keep only CCSA if available, otherwise keep all.")
+    p.add_argument("--color-map", type=str, default=None)
+    p.add_argument("--figsize", type=str, default=None)
+    p.add_argument("--plot-every", type=int, default=1)
+    p.add_argument("--optimizers", type=str, default=None)
     
-    p.add_argument(
-        "--special-both",
-        type=str,
-        default=None,
-        help="Comma-separated run names where both Adam and CCSA should be plotted if present "
-            "(e.g., --special-both 128,256,512)."
-    )
-
-
+    p.add_argument("--special-both",type=str,default=None)
 
 
     args = p.parse_args()
 
-    # parse figsize if provided
+    
     if args.figsize:
         try:
             w, h = args.figsize.split(",")
@@ -533,7 +553,7 @@ if __name__ == "__main__":
     else:
         figsize = (18, 8)
 
-    # parse color_map: accept either a JSON string or path to JSON file
+    
     parsed_color_map = None
     if args.color_map:
         s = args.color_map.strip()
@@ -558,7 +578,6 @@ if __name__ == "__main__":
         optimizers = None
 
 
-    # parse runs
     runs = {}
     for item in args.runs:
         if "=" not in item:
@@ -572,7 +591,6 @@ if __name__ == "__main__":
         special_both = None
 
 
-    # call function with CLI args
     summary = postprocess_losses(
         runs=runs,
         plot_eval_limit=args.plot_eval_limit,
@@ -589,7 +607,7 @@ if __name__ == "__main__":
         legend_loc=args.legend_loc,
         plot_every=args.plot_every,
         optimizers=optimizers,
-        special_both=special_both,   # <-- NEW
+        special_both=special_both,  
     )
 
 
