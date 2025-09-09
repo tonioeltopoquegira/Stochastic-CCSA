@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and experiment runs
+runs/
+data/
+
+# PyTorch & training artifacts
+*.pt
+*.pth
+*.ckpt
+
+# OS files
+.DS_Store
+Thumbs.db
