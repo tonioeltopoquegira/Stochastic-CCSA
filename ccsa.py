@@ -253,6 +253,17 @@ class MMAOptimizerTorch(Optimizer):
                                              sigma_min=self.sigma_min, sigma_max=self.sigma_max)
         self.sub_solver = SubproblemSolver()
 
+        # metrics tracking
+        n = sum(p.numel() for group in self.param_groups for p in group['params'])
+        self.metrics = {
+            "weighted_evals": 0,
+            "sigma_adjustments": 0,
+            "bound_hits": 0,
+            "subproblem_iterations": [],  # Tracks iterations in subproblem solver as a list
+            "sigma_min_hits": np.zeros(n),  # Tracks sigma min limit hits per parameter
+            "sigma_changes": np.zeros((n, 2))  # Tracks enlargements (0) and restrictions (1) per parameter
+        }
+
         self.state["initialized"] = False
 
     def _init_state_from_params(self):
@@ -325,22 +336,37 @@ class MMAOptimizerTorch(Optimizer):
 
             x_candidate, res = self.sub_solver.solve(surrogate_fn, x, final_bounds)
 
+            # Track subproblem iterations and add gradient iteration
+            self.metrics["subproblem_iterations"].append(res.nit + 1)
+
             f_cand, df_cand = self.fun(x_candidate, grad=True)
             g_cand, dg_cand = self.cons(x_candidate, grad=True)
             g_cand = np.atleast_1d(g_cand)
             improved = (f_cand < f_best - 1e-12)
             feasible_cand = np.all(g_cand <= 0.0)
 
-            if improved or feasible_cand:
+            # metrics tracking
+            self.metrics["weighted_evals"] += 1
+            if not improved:
+                # increase penalty and try again
+                rho *= 2.0
+                self.metrics["sigma_adjustments"] += 1
+            else:
                 f_best, x_best, g_best = float(f_cand), x_candidate.copy(), g_cand.copy()
                 # accept this inner solution
                 break
-            else:
-                # increase penalty and try again
-                rho *= 2.0
 
         # update asymptotes based on three-point rule 
         L_new, U_new = self.asym_updater.update(x_old=x, x_new=x_best, L=L.copy(), U=U.copy())
+
+        # Track sigma changes and min hits
+        for j in range(len(self.asym_updater.sigma)):
+            if self.asym_updater.sigma[j] == self.sigma_min:
+                self.metrics["sigma_min_hits"][j] += 1
+            if self.asym_updater.sigma[j] > self.state["L"][j]:
+                self.metrics["sigma_changes"][j, 0] += 1  # Enlargement
+            elif self.asym_updater.sigma[j] < self.state["L"][j]:
+                self.metrics["sigma_changes"][j, 1] += 1  # Restriction
 
         # write back state
         self.state["x"] = x_best.copy()
@@ -359,5 +385,5 @@ class MMAOptimizerTorch(Optimizer):
                 p.data.copy_(new_vals.view_as(p))
                 idx += numel
 
-        return f_best, g_best
+        return f_best, g_best, self.metrics
 
