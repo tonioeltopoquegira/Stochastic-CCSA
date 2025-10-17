@@ -18,8 +18,16 @@ class AsymptoteUpdater:
         self.contract = float(contract)
         self.sigma_min = float(sigma_min)
         self.sigma_max = float(sigma_max)
-        self.lower_bound = lower_bound
-        self.upper_bound = upper_bound
+        if lower_bound is None:
+            self.lower_bound = None
+        else:
+            self.lower_bound = np.asarray(lower_bound, dtype=float)
+
+        if upper_bound is None:
+            self.upper_bound = None
+        else:
+            self.upper_bound = np.asarray(upper_bound, dtype=float)
+
 
         self.sigma = None
         self._prev_x = None
@@ -27,7 +35,13 @@ class AsymptoteUpdater:
 
     def init_asymptotes(self, x0: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n = x0.size
-        sigma = np.maximum(0.5 * np.abs(x0) + 0.1, self.sigma_min)
+        
+
+        if self.lower_bound is not None and self.upper_bound is not None:
+            sigma = 0.5 * (self.upper_bound - self.lower_bound)
+        else:
+            sigma = np.maximum(np.ones_like(x0), self.sigma_min)
+
         sigma = np.minimum(sigma, self.sigma_max)
         self.sigma = sigma.copy()
         L = x0 - self.sigma
@@ -124,18 +138,24 @@ class DualSubproblemBuilder:
         self.n = self.x.size
         self.m = self.gval.size
 
-    def reconstruct_xcur_from_y(self, y: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray, float]:
+    def reconstruct_xcur_from_y(self, y: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray, float, float]:
         """
-        Given y (m,), reconstruct xcur and compute dd_gval, dd_gcval (m,), dd_wval.
-        Mirrors the per-variable reconstruction in dual_func.
+        Given y (m,), reconstruct xcur and compute:
+          - dd_gval  (d->gval in C)
+          - dd_gcval (gcval approximants, shape m)
+          - dd_wval  (wval)
+          - val_extra (sum_j (u*dx + v*dx^2)/(sigma^2 - dx^2))
+        Return: xcur, dd_gval, dd_gcval, dd_wval, val_extra
         """
         y = np.asarray(y, dtype=float).ravel() if self.m > 0 else np.zeros(0, dtype=float)
         xcur = np.empty(self.n, dtype=float)
         dd_gval = float(self.fval)
         dd_gcval = np.zeros(self.m, dtype=float) if self.m > 0 else np.zeros(0, dtype=float)
         dd_wval = 0.0
+        val_extra = 0.0   # accumulate per-variable contribution to the dual objective
 
         dfcdx = self.dg if self.m > 0 else np.zeros((0, self.n), dtype=float)
+        mask = ~np.isnan(self.gval) if self.m > 0 else np.zeros(0, dtype=bool)
 
         for j in range(self.n):
             sj = self.sigma[j]
@@ -143,36 +163,31 @@ class DualSubproblemBuilder:
                 xcur[j] = self.x[j]
                 continue
 
-            # Compute u, v
+            # Compute u, v (u is df/dx_j, plus constraint contributions)
             u = self.df[j]
             v = abs(self.df[j]) * sj + 0.5 * self.rho
-            if self.m > 0:
-                u += np.dot(dfcdx[:, j], y)
-                v += np.dot((np.abs(dfcdx[:, j]) * sj + 0.5 * self.rhoc), y)
+            if self.m > 0 and mask.any():
+                u += np.dot(dfcdx[mask, j], y[mask])
+                v += np.dot((np.abs(dfcdx[mask, j]) * sj + 0.5 * self.rhoc[mask]), y[mask])
 
             sigma2_j = sj * sj
-            u_times_sigma2 = u * sigma2_j
 
-            # stable closed-form dx similar to C code
-            # guard v near zero
-            if v == 0.0:
+            # Follow the C code stable formula exactly:
+            # C multiplies u by sigma^2 first (u_scaled), then uses the stable root form.
+            u_scaled = u * sigma2_j
+            if v == 0.0 or sj == 0.0:
                 dx = 0.0
             else:
-                denom = v * sj
-                if denom == 0.0:
+                # denom_term = v * sj (nonzero here)
+                inner = 1.0 - (u_scaled / (v * sj)) ** 2  # equals 1 - (u * sigma / v)^2 in algebraic terms
+                if inner < 0.0:
+                    inner = 0.0
+                sqrt_inner = np.sqrt(inner)
+                denom_stable = -1.0 - sqrt_inner
+                if denom_stable == 0.0:
                     dx = 0.0
                 else:
-                    ratio = u_times_sigma2 / (v * sj)  # corresponds to u/(v*sigma) * sigma^2? kept for numeric stability
-                    # compute arg = 1 - (u/(v*sigma))^2, but here ratio == u*sigma / v
-                    arg = 1.0 - (u_times_sigma2 / (v * sj)) ** 2 if (v * sj) != 0 else 1.0
-                    if arg < 0.0:
-                        arg = 0.0
-                    sqrt_arg = np.sqrt(arg)
-                    denom_stable = -1.0 - sqrt_arg
-                    if denom_stable == 0.0:
-                        dx = 0.0
-                    else:
-                        dx = (u / v) / denom_stable
+                    dx = (u_scaled / v) / denom_stable
 
             xj = self.x[j] + dx
 
@@ -191,40 +206,50 @@ class DualSubproblemBuilder:
 
             xcur[j] = xj
 
-            # Variables for the dual solve
-            # update dd_gval, dd_gcval and dd_wval
+            # Variables for the dual solve: update dd_gval, dd_gcval and dd_wval
             dxj = xcur[j] - self.x[j]
             dx2 = dxj * dxj
             denomv = sigma2_j - dx2
-            if denomv <= 0.0:
-                denomv = 1e-12
+            if denomv <= 1e-30:
+                denomv = 1e-30
+            denominv = 1.0 / denomv
+
+            # c = sigma^2 * dx
             c = sigma2_j * dxj
-            dd_gval += (self.df[j] * c + (abs(self.df[j]) * sj + 0.5 * self.rho) * dx2) / denomv
+
+            # dd_gval: corresponds to d->gval accumulation in C
+            dd_gval += (self.df[j] * c + (abs(self.df[j]) * sj + 0.5 * self.rho) * dx2) * denominv
+
             if self.m > 0:
-                dd_gcval += (dfcdx[:, j] * c + (np.abs(dfcdx[:, j]) * sj + 0.5 * self.rhoc) * dx2) / denomv
-            dd_wval += 0.5 * dx2 / denomv # Hessian stabilization
+                # apply the same mask when updating dd_gcval
+                if mask.any():
+                    dd_gcval[mask] += (dfcdx[mask, j] * c + (np.abs(dfcdx[mask, j]) * sj + 0.5 * self.rhoc[mask]) * dx2) * denominv
+
+            # dd_wval: wval accumulation
+            dd_wval += 0.5 * dx2 * denominv
+
+            # val_extra: the per-variable part of the dual objective (u_scaled used here)
+            val_extra += (u_scaled * dx + v * dx2) * denominv
 
         dd_wval = float(max(dd_wval, 1e-12))
-        return xcur, dd_gval, dd_gcval, dd_wval
+        return xcur, dd_gval, dd_gcval, dd_wval, val_extra
+
 
     def build_dual_objective(self):
         """
-        Returns (obj_fn, jac_fn) closures suitable for scipy minimize with jac=True.
-        obj_fn(y) -> scalar (we minimize negative dual)
-        jac_fn(y) -> gradient (shape m,)
+        Returns (obj_only, obj_with_grad) closures suitable for scipy minimize with jac=True.
+        obj_with_grad(y) -> (value, grad)
         """
 
         def obj_and_grad(y):
             # compute xcur and approximant values using reconstruction routine
-            xcur, dd_gval, dd_gcval, dd_wval = self.reconstruct_xcur_from_y(y)
-            # dual objective (value used by C code) is: val = dd_gval + sum_i y_i * (gc_i)
-            # but in reconstruction we already included f's contribution and constraint linear parts as in C,
-            # so to match C we compute val similarly to dd_gval + sum_i y_i * fc_i (fc = gval)
-            val = dd_gval
+            xcur, dd_gval, dd_gcval, dd_wval, val_extra = self.reconstruct_xcur_from_y(y)
+            # dual objective value (C's 'val') = dd_gval + sum_i y_i*fc_i + val_extra,
+            # because dd_gval is d->gval and val_extra holds the per-variable (u*dx+v*dx2)/denom contributions.
+            val = dd_gval + val_extra
             if self.m > 0:
-                # initial addition of sum_i y_i * fcval (fcval is self.gval at x)
                 val += float(np.dot(y, self.gval))
-                grad = -dd_gcval  # C code returns -gcval because NLopt minimizes -val
+                grad = -dd_gcval
             else:
                 grad = np.zeros(0, dtype=float)
 
@@ -239,6 +264,7 @@ class DualSubproblemBuilder:
             return obj_and_grad(y)
 
         return obj_only, obj_with_grad
+
 
 # -------------------------
 # Modular MMA optimizer (flat parameter vector)
@@ -314,7 +340,6 @@ class MMAOptimizer:
             "weighted_evals": 0,
             "sigma_adjustments": 0,
             "bound_hits": 0,
-            "subproblem_iterations": [],
             "cumulative_wval": 0.0,
             "acceptance_stats": {
                 "feasible_accept": 0,
@@ -325,7 +350,7 @@ class MMAOptimizer:
         }
         self.history = {
             "x": [x0.copy()],
-            "weighted_evals": [0],
+            "weighted_evals": [1],
             "sigma": [],    # new: store sigma evolution
             "rho": [],      # new: store scalar rho
             "rhoc": []      # new: store per-constraint rhoc vector
@@ -385,7 +410,7 @@ class MMAOptimizer:
         if "x_history" not in self.metrics:
             self.metrics["x_history"] = [self.x.copy()]
         if "cumulative_weighted_evals_history" not in self.metrics:
-            self.metrics["cumulative_weighted_evals_history"] = [0]
+            self.metrics["cumulative_weighted_evals_history"] = [1]
 
         # ---- inner loop: solve subproblem(s) ----
         for inner in range(self.max_inner):
@@ -413,8 +438,8 @@ class MMAOptimizer:
                                options={'maxiter': 200, 'ftol': 1e-9})
 
                 y_opt = res.x
-                self.metrics["subproblem_iterations"].append(getattr(res, "nit", 0) + 1)
-                xcur, dd_gval, dd_gcval, dd_wval = builder.reconstruct_xcur_from_y(y_opt)
+                #self.metrics["subproblem_iterations"].append(getattr(res, "nit", 0) + 1)
+                xcur, dd_gval, dd_gcval, dd_wval, val_extra = builder.reconstruct_xcur_from_y(y_opt)
 
                 if self.df is None:
                     fcur, dfcur = self.fun(xcur, grad=True)
@@ -427,7 +452,7 @@ class MMAOptimizer:
                 else:
                     fcval_cur = np.zeros(0, dtype=float)
 
-                self.metrics["weighted_evals"] += 1
+                self.metrics["weighted_evals"] += 0.5
 
                 inner_done = (dd_gval >= fcur)
                 feasible_cur = True
@@ -479,14 +504,14 @@ class MMAOptimizer:
 
             else:
                 # Unconstrained case
-                xcur, dd_gval, dd_gcval, dd_wval = builder.reconstruct_xcur_from_y(np.zeros(0, dtype=float))
+                xcur, dd_gval, dd_gcval, dd_wval, val_extra = builder.reconstruct_xcur_from_y(np.zeros(0, dtype=float))
                 if self.df is None:
                     fcur, dfcur = self.fun(xcur, grad=True)
                 else:
                     fcur = float(self.fun(xcur))
                     dfcur = np.asarray(self.df(xcur), dtype=float).ravel()
-                self.metrics["subproblem_iterations"].append(1)
-                self.metrics["weighted_evals"] += 1
+                
+                self.metrics["weighted_evals"] += 0.5
 
                 if fcur < f_best - 1e-12:
                     f_best = float(fcur)
@@ -495,6 +520,7 @@ class MMAOptimizer:
                     df = dfcur.copy()
                     wval_used = dd_wval
                     accept_type = "improve_only"
+
                     break
                 else:
                     if fcur > dd_gval:
@@ -520,6 +546,8 @@ class MMAOptimizer:
         # ---- Record full histories ----
         self.metrics["cumulative_wval"] += float(wval_used)
         self.metrics["acceptance_stats"][accept_type] += 1
+
+        self.metrics["weighted_evals"] += 1.0
 
         self.metrics["x_history"].append(x_best.copy())
         self.metrics["sigma_history"].append(self.asym.sigma.copy())
