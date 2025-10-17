@@ -150,7 +150,11 @@ class DualSubproblemBuilder:
         y = np.asarray(y, dtype=float).ravel() if self.m > 0 else np.zeros(0, dtype=float)
         xcur = np.empty(self.n, dtype=float)
         dd_gval = float(self.fval)
-        dd_gcval = np.zeros(self.m, dtype=float) if self.m > 0 else np.zeros(0, dtype=float)
+        if self.m > 0:
+            # initialize with current gval, but use 0 where gval is NaN (same behaviour as C)
+            dd_gcval = np.where(np.isnan(self.gval), 0.0, self.gval).astype(float).copy()
+        else:
+            dd_gcval = np.zeros(0, dtype=float)
         dd_wval = 0.0
         val_extra = 0.0   # accumulate per-variable contribution to the dual objective
 
@@ -414,6 +418,7 @@ class MMAOptimizer:
 
         # ---- inner loop: solve subproblem(s) ----
         for inner in range(self.max_inner):
+            
             sigma_vec = self.asym.sigma.copy()
 
             builder = DualSubproblemBuilder(
@@ -441,6 +446,24 @@ class MMAOptimizer:
                 #self.metrics["subproblem_iterations"].append(getattr(res, "nit", 0) + 1)
                 xcur, dd_gval, dd_gcval, dd_wval, val_extra = builder.reconstruct_xcur_from_y(y_opt)
 
+                # --- DUAL DIAGNOSTICS ---
+                print("\n--- DUAL DIAGNOSTICS ---")
+                print(f"inner = {inner}")
+                print(f"rho = {rho:.3e}")
+                print(f"dd_gval = {dd_gval:.4e}, dd_wval = {dd_wval:.4e}")
+                print(f"y_opt norm = {np.linalg.norm(y_opt):.4e}, res.success = {res.success}, nit = {res.nit}")
+                print(f"fval = {fval:.4e}")
+                print(f"gval (first 5) = {gval[:5]}")
+                print(f"dd_gcval (first 5) = {dd_gcval[:5]}")
+                if self.g is not None:
+                    fcval_cur = np.atleast_1d(self.g(xcur)).astype(float)
+                    print(f"fcval_cur (first 5) = {fcval_cur[:5]}")
+                    print(f"max|fcval_cur - dd_gcval| = {np.max(np.abs(fcval_cur - dd_gcval)):.4e}")
+                print(f"xcur[:5] = {xcur[:5]}")
+                print(f"sigma[:5] = {self.asym.sigma[:5]}")
+                print("--------------------------\n")
+
+
                 if self.df is None:
                     fcur, dfcur = self.fun(xcur, grad=True)
                 else:
@@ -451,6 +474,7 @@ class MMAOptimizer:
                     fcval_cur = np.atleast_1d(self.g(xcur)).astype(float)
                 else:
                     fcval_cur = np.zeros(0, dtype=float)
+                
 
                 self.metrics["weighted_evals"] += 0.5
 
