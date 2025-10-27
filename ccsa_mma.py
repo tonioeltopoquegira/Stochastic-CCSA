@@ -446,7 +446,7 @@ class MMAOptimizer:
                 #self.metrics["subproblem_iterations"].append(getattr(res, "nit", 0) + 1)
                 xcur, dd_gval, dd_gcval, dd_wval, val_extra = builder.reconstruct_xcur_from_y(y_opt)
 
-                # --- DUAL DIAGNOSTICS ---
+                '''# --- DUAL DIAGNOSTICS ---
                 print("\n--- DUAL DIAGNOSTICS ---")
                 print(f"inner = {inner}")
                 print(f"rho = {rho:.3e}")
@@ -461,7 +461,7 @@ class MMAOptimizer:
                     print(f"max|fcval_cur - dd_gcval| = {np.max(np.abs(fcval_cur - dd_gcval)):.4e}")
                 print(f"xcur[:5] = {xcur[:5]}")
                 print(f"sigma[:5] = {self.asym.sigma[:5]}")
-                print("--------------------------\n")
+                print("--------------------------\n")'''
 
 
                 if self.df is None:
