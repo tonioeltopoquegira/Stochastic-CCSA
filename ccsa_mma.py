@@ -34,25 +34,40 @@ class AsymptoteUpdater:
         self._prev_prev_x = None
 
     def init_asymptotes(self, x0: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        n = x0.size
-        
+        n = int(x0.size)
 
-        if self.lower_bound is not None and self.upper_bound is not None:
-            sigma = 0.5 * (self.upper_bound - self.lower_bound)
-        else:
-            sigma = np.maximum(np.ones_like(x0), self.sigma_min)
+        # make safe arrays for bounds (±inf where user didn't provide bounds)
+        lb_arr = self.lower_bound if self.lower_bound is not None else -np.inf * np.ones(n, dtype=float)
+        ub_arr = self.upper_bound if self.upper_bound is not None else np.inf * np.ones(n, dtype=float)
+        lb_arr = np.asarray(lb_arr, dtype=float).ravel()
+        ub_arr = np.asarray(ub_arr, dtype=float).ravel()
 
-        sigma = np.minimum(sigma, self.sigma_max)
-        self.sigma = sigma.copy()
+        # allocate sigma and initialize per NLopt/C behavior:
+        # if either bound is infinite -> sigma = 1.0, else sigma = 0.5*(ub-lb)
+        self.sigma = np.empty(n, dtype=float)
+        for j in range(n):
+            if np.isinf(lb_arr[j]) or np.isinf(ub_arr[j]):
+                self.sigma[j] = 1.0
+            else:
+                self.sigma[j] = 0.5 * (ub_arr[j] - lb_arr[j])
+            # enforce user/global floors/ceilings (keep your sigma_min/sigma_max if you like)
+            self.sigma[j] = max(self.sigma[j], self.sigma_min)
+            self.sigma[j] = min(self.sigma[j], self.sigma_max)
+
+        # build L, U and clip to provided bounds (only if user provided them)
         L = x0 - self.sigma
         U = x0 + self.sigma
         if self.lower_bound is not None:
-            L = np.maximum(L, self.lower_bound)
+            L = np.maximum(L, lb_arr)
         if self.upper_bound is not None:
-            U = np.minimum(U, self.upper_bound)
+            U = np.minimum(U, ub_arr)
+
+        # set iteration history like NLopt (both prevs = x0 at start)
         self._prev_prev_x = x0.copy()
         self._prev_x = x0.copy()
+
         return L, U
+
 
     def update(self, x_old: np.ndarray, x_new: np.ndarray, L: np.ndarray, U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n = x_old.size
@@ -60,14 +75,26 @@ class AsymptoteUpdater:
         x_km1 = x_old
         x_km2 = self._prev_prev_x if self._prev_prev_x is not None else x_km1
 
+        self._prev_prev_x = x_old.copy()
+        self._prev_x = x_new.copy()
+
         for j in range(n):
             diff1 = x_k[j] - x_km1[j]
             diff2 = x_km1[j] - x_km2[j]
             prod = diff1 * diff2
             if prod > 0.0:
-                self.sigma[j] = min(self.sigma[j] * self.expand, self.sigma_max)
+                self.sigma[j] = self.sigma[j] * self.expand
             elif prod < 0.0:
                 self.sigma[j] = max(self.sigma[j] * self.contract, self.sigma_min)
+            
+            lbj = self.lower_bound[j] if self.lower_bound is not None else -np.inf
+            ubj = self.upper_bound[j] if self.upper_bound is not None else np.inf
+            if not np.isinf(lbj) and not np.isinf(ubj):
+                width = ubj - lbj
+                self.sigma[j] = min(self.sigma[j], 10.0 * width)
+                self.sigma[j] = max(self.sigma[j], 0.01 * width)
+        
+            self.sigma[j] = max(self.sigma[j], self.sigma_min)
 
         L_new = x_k - self.sigma
         U_new = x_k + self.sigma
@@ -87,8 +114,7 @@ class AsymptoteUpdater:
                 U_new[j] = center + 0.5 * min_width
                 self.sigma[j] = 0.5 * min_width
 
-        self._prev_prev_x = x_old.copy()
-        self._prev_x = x_new.copy()
+       
         return L_new, U_new
 
 
@@ -188,10 +214,16 @@ class DualSubproblemBuilder:
                     inner = 0.0
                 sqrt_inner = np.sqrt(inner)
                 denom_stable = -1.0 - sqrt_inner
+                '''sqrt_inner = np.sqrt(abs(inner))
+                dx = np.sign(u_scaled) * v * sj * sqrt_inner'''
                 if denom_stable == 0.0:
                     dx = 0.0
                 else:
                     dx = (u_scaled / v) / denom_stable
+
+           
+               
+
 
             xj = self.x[j] + dx
 
@@ -268,6 +300,7 @@ class DualSubproblemBuilder:
             return obj_and_grad(y)
 
         return obj_only, obj_with_grad
+
 
 
 # -------------------------
