@@ -12,14 +12,12 @@ class AsymptoteUpdater:
                  expand: float = 1.2,
                  contract: float = 0.7,
                  sigma_min: float = 1e-6,
-                 sigma_max: float = 1e20,
                  lower_bound: Optional[float] = None,
                  upper_bound: Optional[float] = None):
         
         self.expand = float(expand)
         self.contract = float(contract)
         self.sigma_min = float(sigma_min)
-        self.sigma_max = float(sigma_max)
 
         # We can delete this part... it will never be none if we provide it in MMAOptimizer
         if lower_bound is None:
@@ -58,7 +56,7 @@ class AsymptoteUpdater:
                 self.sigma[j] = 0.5 * (ub_arr[j] - lb_arr[j])
             # enforce floors/ceilings
             self.sigma[j] = max(self.sigma[j], self.sigma_min)
-            #self.sigma[j] = min(self.sigma[j], self.sigma_max)
+            
 
         # build L, U and clip to provided bounds (only if user provided them)
         L = x0 - self.sigma
@@ -329,7 +327,6 @@ class MMAOptimizer:
                  rho_init: float = 1.0,
                  max_inner: int = 5,
                  sigma_min: float = 1e-6,
-                 sigma_max: float = 1e20,
                  expand: float = 1.2,
                  contract: float = 0.7,
                  df: Optional[Callable] = None,
@@ -349,7 +346,6 @@ class MMAOptimizer:
         self.max_inner = int(max_inner)
         self.rho = float(rho_init)      # scalar rho (objective curvature)
         self.sigma_min = float(sigma_min)
-        self.sigma_max = float(sigma_max)
         self.expand = float(expand)
         self.contract = float(contract)
 
@@ -377,7 +373,7 @@ class MMAOptimizer:
 
         # asymptotes manager
         self.asym = AsymptoteUpdater(expand=self.expand, contract=self.contract,
-                                     sigma_min=self.sigma_min, sigma_max=self.sigma_max,
+                                     sigma_min=self.sigma_min,
                                      lower_bound=self.lb, upper_bound=self.ub)
         
         L, U = self.asym.init_asymptotes(self.x_k)
