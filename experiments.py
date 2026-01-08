@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from utils import randcond, make_red_colors
 from baselines.adam import adam
 from baselines.adam_al import adam_augmented_lagrangian
+from baselines.cssca.core import CSSCAOptimizer
 
 import matplotlib.patches as mpatches
 
@@ -419,6 +420,30 @@ def stoch_convex_con_exp(
     colors_ccsa = plt.cm.inferno(np.linspace(0.2, 0.8, len(sigma_mins)))
     ccsa_quad_results = []
 
+    # --- Run baseline CSSCA optimizer (single constant rho schedule) ---
+    try:
+        cssca_results = None
+        cssca_opt = CSSCAOptimizer(params=x0.copy(), fun=make_noisy_f_and_grad(A, sample_xi),
+                                   g=constraint_val, dg=lambda xx: np.atleast_2d(c),
+                                   x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                                   samples_per_iter=1)
+
+        cssca_f_hist = []
+        cssca_cons_hist = []
+        # run a fixed number of outer iterations similar to mma_maxeval
+        for t in range(mma_maxeval):
+            # CSSCA uses sample drawer; pass our sample_xi
+            x_cssca, f_cssca, cons_cssca = cssca_opt.step(sample_drawer=sample_xi)
+            cssca_f_hist.append(f_cssca)
+            cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
+
+        cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
+        print(f"CSSCA (rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
+    except Exception as e:
+        cssca_f_hist = []
+        cssca_cons_arr = np.array([])
+        print(f"Failed to run CSSCA optimizer: {e}")
+
     oracle = make_noisy_f_and_grad(A, sample_xi)
     optimizer_quad.fun = oracle
     optimizer_quad.g = constraint_val
@@ -479,8 +504,8 @@ def stoch_convex_con_exp(
     ax1 = plt.subplot(1,2,1)
     ax1.plot(hist_al['iter'], hist_al['f_est'], '-', color='black', label='AL-Adam')
 
-    for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
-        ax1.plot(f_evals, f_vals, '.-', color=color, alpha=0.9, label=f'MMA σ={sigma_min}')
+    #for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
+    #    ax1.plot(f_evals, f_vals, '.-', color=color, alpha=0.9, label=f'MMA σ={sigma_min}')
 
     # CCSA: solid lines, different color palette (not dashed)
     for cr in ccsa_results:
@@ -498,6 +523,13 @@ def stoch_convex_con_exp(
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
                      marker='.', color=cr['color'], label=f'custom quad σ={cr["sigma_min"]}')
+
+    # plot CSSCA if available
+    try:
+        if len(cssca_f_hist) > 0:
+            ax1.plot(np.arange(1, len(cssca_f_hist)+1), cssca_f_hist, linestyle='-', color='purple', label=f'CSSCA ρ={rho}')
+    except NameError:
+        pass
     
 
 
@@ -524,13 +556,24 @@ def stoch_convex_con_exp(
     # constraint panel
     ax2 = plt.subplot(1,2,2)
     ax2.plot(hist_al['iter'], hist_al['g'], '-', color='black', label='AL-Adam g(x)')
-    for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
-        ax2.plot(f_evals, g_vals, '.-', color=color, alpha=0.9, label=f'NLOPT σ={sigma_min}')
+    #for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
+    #    ax2.plot(f_evals, g_vals, '.-', color=color, alpha=0.9, label=f'NLOPT σ={sigma_min}')
     for cr in ccsa_results:
         ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='red', label=f'CCSA σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
         ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=cr['color'], label=f'CCSA QUAD σ={cr["sigma_min"]}')
+
+    # CSSCA constraint trace
+    try:
+        if cssca_cons_arr.size != 0:
+            # plot first constraint component if present
+            if cssca_cons_arr.ndim == 2:
+                ax2.plot(np.arange(1, cssca_cons_arr.shape[0]+1), cssca_cons_arr[:, 0], linestyle='-', color='purple', label=f'CSSCA g[0] ρ={rho}')
+            else:
+                ax2.plot(np.arange(1, len(cssca_cons_arr)+1), cssca_cons_arr, linestyle='-', color='purple', label=f'CSSCA g ρ={rho}')
+    except NameError:
+        pass
 
     ax2.axhline(0, color='k', linestyle='--', label='feasibility')
     ax2.axhline(g_uncon, color='gray', linestyle=':', label='unconstrained g')
