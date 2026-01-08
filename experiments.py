@@ -423,17 +423,21 @@ def stoch_convex_con_exp(
     # --- Run baseline CSSCA optimizer (single constant rho schedule) ---
     try:
         cssca_results = None
-        cssca_opt = CSSCAOptimizer(params=x0.copy(), fun=make_noisy_f_and_grad(A, sample_xi),
-                                   g=constraint_val, dg=lambda xx: np.atleast_2d(c),
+        # Use deterministic (no-sample) oracle and deterministic constraint for CSSCA
+        # to match the debug harness (no xi drawn inside surrogate updates).
+        cssca_opt = CSSCAOptimizer(params=x0.copy(),
+                                   fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                                   g=lambda xx: float(np.dot(c, xx) - b),
+                                   dg=lambda xx: np.atleast_2d(c),
                                    x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                   samples_per_iter=1)
+                                   tau_obj=1.0, tau_cons=1.0, samples_per_iter=1)
 
         cssca_f_hist = []
         cssca_cons_hist = []
         # run a fixed number of outer iterations similar to mma_maxeval
         for t in range(mma_maxeval):
-            # CSSCA uses sample drawer; pass our sample_xi
-            x_cssca, f_cssca, cons_cssca = cssca_opt.step(sample_drawer=sample_xi)
+            # Use deterministic step (no sample drawer) so CSSCA solves the same expected problem
+            x_cssca, f_cssca, cons_cssca = cssca_opt.step()
             cssca_f_hist.append(f_cssca)
             cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
 
