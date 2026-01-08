@@ -1,9 +1,4 @@
-from typing import Callable, Optional, Tuple
 import numpy as np
-from scipy.optimize import minimize
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-
 from dataclasses import dataclass
 
 @dataclass
@@ -18,8 +13,10 @@ class MMA_SigmaParams:
     expand: float = 1.2          # expansion multiplier on consistent movement
     contract: float = 0.7        # contraction multiplier on oscillation
     sigma_min: float = 1e-6      # absolute minimal sigma (numerical floor)
-    rel_min: float = 0.01        # sigma >= rel_min * (ub - lb)
-    rel_max: float = 10.0        # sigma <= rel_max * (ub - lb)
+    rel_min: float = 0.01        # sigma >= rel_min * (ub - lb) when finite bounds exist
+    rel_max: float = 10.0        # sigma <= rel_max * (ub - lb) when finite bounds exist
+   
+    
 
 def update_rho(rho, gap, w_val, rho_params: MMA_RhoParams):
     """
@@ -38,3 +35,4 @@ def update_rho(rho, gap, w_val, rho_params: MMA_RhoParams):
     rho_new = np.maximum(rho, rho_new)
 
     return rho_new
+

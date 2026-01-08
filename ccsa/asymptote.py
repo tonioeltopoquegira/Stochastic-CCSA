@@ -1,13 +1,17 @@
-import numpy as np
 from typing import Optional, Tuple
-from .params import MMA_SigmaParams
+import numpy as np
+from ccsa.params import MMA_SigmaParams
 
+
+# -------------------------
+# Asymptote updater (3-point Svanberg rule)
+# -------------------------
 class AsymptoteUpdater:
     def __init__(self,
                  sigma_params: Optional[MMA_SigmaParams] = None,
                  lower_bound: Optional[float] = None,
                  upper_bound: Optional[float] = None):
-
+        # prefer passed sigma_params or defaults
         self.sigma_params = sigma_params if sigma_params is not None else MMA_SigmaParams()
         self.expand = float(self.sigma_params.expand)
         self.contract = float(self.sigma_params.contract)
@@ -57,7 +61,7 @@ class AsymptoteUpdater:
         self.x_km1 = x0.copy()
         return L, U
 
-    def update(self, x_km1: np.ndarray, x_kp1: np.ndarray, L: np.ndarray, U: np.ndarray):
+    def update(self, x_km1: np.ndarray, x_kp1: np.ndarray, L: np.ndarray, U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n = x_km1.size
         x_k = x_kp1
         x_km1_local = x_km1
@@ -75,6 +79,7 @@ class AsymptoteUpdater:
             elif prod < 0.0:
                 self.sigma[j] = max(self.sigma[j] * self.contract, self.sigma_min)
 
+            # relative bounds if global box known
             lbj = self.lower_bound[j] if self.lower_bound is not None else -np.inf
             ubj = self.upper_bound[j] if self.upper_bound is not None else np.inf
             if not np.isinf(lbj) and not np.isinf(ubj):
@@ -91,6 +96,7 @@ class AsymptoteUpdater:
         if self.upper_bound is not None:
             U_new = np.minimum(U_new, self.upper_bound)
 
+        # ensure minimal width numerical safety
         widths = U_new - L_new
         min_width = self.sigma_min
         for j in range(n):
