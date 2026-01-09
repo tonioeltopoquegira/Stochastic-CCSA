@@ -199,6 +199,7 @@ def stoch_convex_con_exp(
     verbose: bool = True,
     ccsa_plot_expected: bool = True,
     ccsa_n_outer: int = 100
+    , cssca_tau_obj: float = 1.0, cssca_tau_cons: float = 1.0
 ):
 
     # deterministic RNG for this experiment (single source)
@@ -426,11 +427,11 @@ def stoch_convex_con_exp(
         # Use deterministic (no-sample) oracle and deterministic constraint for CSSCA
         # to match the debug harness (no xi drawn inside surrogate updates).
         cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                   fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
-                                   g=lambda xx: float(np.dot(c, xx) - b),
-                                   dg=lambda xx: np.atleast_2d(c),
-                                   x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                   tau_obj=1.0, tau_cons=1.0, samples_per_iter=1)
+                       fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                       g=lambda xx: float(np.dot(c, xx) - b),
+                       dg=lambda xx: np.atleast_2d(c),
+                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                       tau_obj=float(cssca_tau_obj), tau_cons=float(cssca_tau_cons), samples_per_iter=1)
 
         cssca_f_hist = []
         cssca_cons_hist = []
