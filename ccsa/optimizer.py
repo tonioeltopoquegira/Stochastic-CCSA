@@ -1,8 +1,6 @@
 from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 from ccsa.params import MMA_RhoParams, MMA_SigmaParams, update_rho
 from ccsa.asymptote import AsymptoteUpdater

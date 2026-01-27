@@ -59,7 +59,7 @@ def stoch_convex_unc_exp(optimizer, optimizer_nlopt, noise, cond, sigma_mins=Non
 
     # Plot setup
     plt.figure(figsize=(6, 4))
-    plt.plot(vals, "g-", label="adam", color="green") # loglog to be done
+    plt.plot(vals, "-", label="adam", color="black", linewidth=1.25)
     if sigma_mins is not None:
         colors = make_red_colors(len(sigma_mins))
 
@@ -100,7 +100,8 @@ def stoch_convex_unc_exp(optimizer, optimizer_nlopt, noise, cond, sigma_mins=Non
 
 
                     xopt = optimizer_nlopt.optimize(x_init)
-                    plt.loglog(np.asarray(f_evals), f_vals, label=f"nlopt σ={sigma_min}", color=color)
+                    # NLopt: use a high-contrast blue if available from the palette
+                    plt.loglog(np.asarray(f_evals), f_vals, label=f"nlopt σ={sigma_min}", color='tab:blue')
             else:
                 evals = 0
                 f_evals, x_errs, f_vals = [], [], []
@@ -112,7 +113,7 @@ def stoch_convex_unc_exp(optimizer, optimizer_nlopt, noise, cond, sigma_mins=Non
 
 
                 xopt = optimizer_nlopt.optimize(x_init)
-                plt.loglog(np.asarray(f_evals), f_vals, label=f"nlopt", color='red')
+                plt.loglog(np.asarray(f_evals), f_vals, label=f"nlopt", color='tab:blue')
                     
     # Adding the new CCSA implementation (use same oracle defined above)
     if optimizer is not None:
@@ -199,7 +200,7 @@ def stoch_convex_con_exp(
     verbose: bool = True,
     ccsa_plot_expected: bool = True,
     ccsa_n_outer: int = 100
-    , cssca_tau_obj: float = 1.0, cssca_tau_cons: float = 1.0
+    , cssca_tau_obj: float = 1.0, cssca_tau_cons: float = 1.0, cssca_samples_per_iter=None
 ):
 
     # deterministic RNG for this experiment (single source)
@@ -422,32 +423,51 @@ def stoch_convex_con_exp(
     ccsa_quad_results = []
 
     # --- Run baseline CSSCA optimizer (single constant rho schedule) ---
-    try:
-        cssca_results = None
-        # Use deterministic (no-sample) oracle and deterministic constraint for CSSCA
-        # to match the debug harness (no xi drawn inside surrogate updates).
-        cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                       fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
-                       g=lambda xx: float(np.dot(c, xx) - b),
-                       dg=lambda xx: np.atleast_2d(c),
-                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                       tau_obj=float(cssca_tau_obj), tau_cons=float(cssca_tau_cons), samples_per_iter=1)
+    # Allow cssca_tau_obj and cssca_tau_cons to be scalars or lists; run one config per pair
+    cssca_tau_objs_list = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple, np.ndarray)) else [cssca_tau_obj]
+    cssca_tau_cons_list = cssca_tau_cons if isinstance(cssca_tau_cons, (list, tuple, np.ndarray)) else [cssca_tau_cons]
+    # samples per iter
+    if cssca_samples_per_iter is None:
+        cssca_samples_list = [1]
+    else:
+        cssca_samples_list = cssca_samples_per_iter if isinstance(cssca_samples_per_iter, (list, tuple, np.ndarray)) else [cssca_samples_per_iter]
 
-        cssca_f_hist = []
-        cssca_cons_hist = []
-        # run a fixed number of outer iterations similar to mma_maxeval
-        for t in range(mma_maxeval):
-            # Use deterministic step (no sample drawer) so CSSCA solves the same expected problem
-            x_cssca, f_cssca, cons_cssca = cssca_opt.step()
-            cssca_f_hist.append(f_cssca)
-            cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
+    # broadcast scalars to common length
+    L = max(len(cssca_tau_objs_list), len(cssca_tau_cons_list), len(cssca_samples_list))
+    def _broadcast(lst, L):
+        if len(lst) == L:
+            return list(lst)
+        if len(lst) == 1:
+            return list(lst) * L
+        raise ValueError("CSSCA parameter lists must be length 1 or equal to each other")
 
-        cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
-        print(f"CSSCA (rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
-    except Exception as e:
-        cssca_f_hist = []
-        cssca_cons_arr = np.array([])
-        print(f"Failed to run CSSCA optimizer: {e}")
+    cssca_tau_objs_list = _broadcast(list(cssca_tau_objs_list), L)
+    cssca_tau_cons_list = _broadcast(list(cssca_tau_cons_list), L)
+    cssca_samples_list = _broadcast(list(cssca_samples_list), L)
+
+    cssca_runs = []
+    for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
+        try:
+            cssca_opt = CSSCAOptimizer(params=x0.copy(),
+                                       fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                                       g=lambda xx: float(np.dot(c, xx) - b),
+                                       dg=lambda xx: np.atleast_2d(c),
+                                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                                       tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
+
+            cssca_f_hist = []
+            cssca_cons_hist = []
+            for t in range(mma_maxeval):
+                x_cssca, f_cssca, cons_cssca = cssca_opt.step()
+                cssca_f_hist.append(f_cssca)
+                cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
+
+            cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
+            print(f"CSSCA (tau_obj={tau_o}, tau_cons={tau_c}, rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
+            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": cssca_f_hist, "cons_arr": cssca_cons_arr})
+        except Exception as e:
+            print(f"Failed to run CSSCA optimizer (tau_obj={tau_o}, tau_cons={tau_c}): {e}")
+            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": [], "cons_arr": np.array([])})
 
     oracle = make_noisy_f_and_grad(A, sample_xi)
     optimizer_quad.fun = oracle
@@ -499,6 +519,77 @@ def stoch_convex_con_exp(
         print(f"CCSA σ={sigma_min}: cumulative_wval={metrics.get('cumulative_wval', np.nan):.6g}, weighted_evals={metrics.get('weighted_evals', np.nan)}, x_history_len={len(x_hist)}")
 
 
+    # --- Ensure first plotted value reflects x0 for all result traces ---
+    init_f_expected = expected_f(x0)
+    init_f_stoch = f_stoch_estimate(x0)
+    init_g_nom = float(np.dot(c, x0) - b)
+
+    def _prepend_ccsa_entry(entry):
+        # entry contains 'cum_we_hist', 'f_expected_at_xhist','f_stoch_at_xhist','g_at_xhist'
+        cum = np.asarray(entry.get('cum_we_hist', []), dtype=float)
+        fexp = np.asarray(entry.get('f_expected_at_xhist', []), dtype=float)
+        fst = np.asarray(entry.get('f_stoch_at_xhist', []), dtype=float)
+        g = np.asarray(entry.get('g_at_xhist', []), dtype=float)
+
+        if cum.size == 0:
+            new_cum = np.array([1.0])
+        else:
+            # shift existing x-axis by +1 so we can insert x0 at position 1
+            new_cum = np.concatenate(([1.0], cum + 1.0))
+
+        new_fexp = np.concatenate(([init_f_expected], fexp)) if fexp.size > 0 else np.array([init_f_expected])
+        new_fst = np.concatenate(([init_f_stoch], fst)) if fst.size > 0 else np.array([init_f_stoch])
+        new_g = np.concatenate(([init_g_nom], g)) if g.size > 0 else np.array([init_g_nom])
+
+        entry['cum_we_hist'] = new_cum
+        entry['f_expected_at_xhist'] = new_fexp
+        entry['f_stoch_at_xhist'] = new_fst
+        entry['g_at_xhist'] = new_g
+
+    def _prepend_cssca_run(run):
+        # run contains 'f_hist' (1D) and 'cons_arr' (maybe 1D or 2D)
+        fh = np.asarray(run.get('f_hist', []), dtype=float)
+        if fh.size == 0:
+            run['f_hist'] = np.array([init_f_expected])
+        else:
+            run['f_hist'] = np.concatenate(([init_f_expected], fh))
+
+        carr = run.get('cons_arr', np.array([]))
+        carr = np.asarray(carr)
+        if carr.size == 0:
+            run['cons_arr'] = np.array([init_g_nom])
+        else:
+            if carr.ndim == 1:
+                run['cons_arr'] = np.concatenate(([init_g_nom], carr.astype(float)))
+            elif carr.ndim == 2:
+                # prepend a row with init_g_nom repeated for each constraint column
+                mcols = carr.shape[1]
+                first_row = np.full((1, mcols), float(init_g_nom), dtype=float)
+                run['cons_arr'] = np.vstack((first_row, carr.astype(float)))
+            else:
+                # unexpected shape: coerce to 1D and prepend
+                run['cons_arr'] = np.concatenate(([init_g_nom], carr.ravel().astype(float)))
+
+    # apply prepend to CCSA results
+    for cr in ccsa_results:
+        try:
+            _prepend_ccsa_entry(cr)
+        except Exception:
+            pass
+    for cr in ccsa_quad_results:
+        try:
+            _prepend_ccsa_entry(cr)
+        except Exception:
+            pass
+
+    # apply prepend to cssca runs
+    if 'cssca_runs' in locals():
+        for run in cssca_runs:
+            try:
+                _prepend_cssca_run(run)
+            except Exception:
+                pass
+
     # Plotting: objective + constraint panels with patches
     plt.figure(figsize=(12,5))
 
@@ -512,27 +603,35 @@ def stoch_convex_con_exp(
     #for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
     #    ax1.plot(f_evals, f_vals, '.-', color=color, alpha=0.9, label=f'MMA σ={sigma_min}')
 
-    # CCSA: solid lines, different color palette (not dashed)
+    # CCSA: use their assigned color palette (from earlier 'color' entries) for visibility
     for cr in ccsa_results:
+        col = cr.get('color', 'tab:orange')
         if ccsa_plot_expected:
-            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
-                     color='red', label=f'custom σ={cr["sigma_min"]}')
+            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
+                     color=col, label=f'custom σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='.', color='red', label=f'custom σ={cr["sigma_min"]}')
+                     marker='o', markersize=4, color=col, label=f'custom σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
+        col = cr.get('color', 'tab:green')
         if ccsa_plot_expected:
-            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
-                     color=cr['color'], label=f'custom quad σ={cr["sigma_min"]}')
+            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
+                     color=col, label=f'custom quad σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='.', color=cr['color'], label=f'custom quad σ={cr["sigma_min"]}')
+                     marker='s', markersize=4, color=col, label=f'custom quad σ={cr["sigma_min"]}')
 
-    # plot CSSCA if available
+    # plot CSSCA runs if available
     try:
-        if len(cssca_f_hist) > 0:
-            ax1.plot(np.arange(1, len(cssca_f_hist)+1), cssca_f_hist, linestyle='-', color='purple', label=f'CSSCA ρ={rho}')
+        if 'cssca_runs' in locals() and len(cssca_runs) > 0:
+            # choose tab10 colors for CSSCA runs (high contrast); cycle if more than 10 runs
+            colors_css = plt.cm.tab10(np.arange(len(cssca_runs)) % 10)
+            for idx, run in enumerate(cssca_runs):
+                fh = run.get('f_hist', [])
+                if len(fh) > 0:
+                    ax1.plot(np.arange(1, len(fh)+1), fh, linestyle='-', linewidth=2.0,
+                             color=colors_css[idx], label=f"CSSCA τo={run['tau_obj']}, τc={run['tau_cons']}")
     except NameError:
         pass
     
@@ -542,16 +641,19 @@ def stoch_convex_con_exp(
     # constrained: center at val_star
     ax1.axhspan(val_star - patch_half, val_star + patch_half, alpha=0.18, facecolor='tab:orange')
     # unconstrained baseline: center at val_uncon
-    ax1.axhspan(val_uncon - patch_half, val_uncon + patch_half, alpha=0.12, facecolor='tab:gray')
+    #ax1.axhspan(val_uncon - patch_half, val_uncon + patch_half, alpha=0.12, facecolor='tab:gray')
 
-    # add legend patches for these bands
+    # add legend patches for these bands and deduplicate legend entries (keep order)
     constrained_patch = mpatches.Patch(facecolor='tab:orange', alpha=0.18, label='stochastic constrained (± noise const)')
-    unconstrained_patch = mpatches.Patch(facecolor='tab:gray', alpha=0.12, label='stochastic unconstrained (± noise const)')
-    # build legend (include patches)
     handles, labels = ax1.get_legend_handles_labels()
-    handles = handles + [constrained_patch, unconstrained_patch]
-    labels = labels + [constrained_patch.get_label(), unconstrained_patch.get_label()]
-    ax1.legend(handles, labels, loc='best', fontsize='small')
+    # deduplicate while preserving order
+    from collections import OrderedDict
+    unique = OrderedDict()
+    for h, l in zip(handles, labels):
+        if l not in unique:
+            unique[l] = h
+    unique[constrained_patch.get_label()] = constrained_patch
+    ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
 
     ax1.axhline(val_star, color='k', linestyle='--', linewidth=1.0)
     ax1.axhline(val_uncon, color='gray', linestyle=':', linewidth=1.0)
@@ -564,19 +666,28 @@ def stoch_convex_con_exp(
     #for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
     #    ax2.plot(f_evals, g_vals, '.-', color=color, alpha=0.9, label=f'NLOPT σ={sigma_min}')
     for cr in ccsa_results:
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='red', label=f'CCSA σ={cr["sigma_min"]}')
+        col = cr.get('color', 'tab:orange')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=cr['color'], label=f'CCSA QUAD σ={cr["sigma_min"]}')
+        col = cr.get('color', 'tab:green')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA QUAD σ={cr["sigma_min"]}')
 
-    # CSSCA constraint trace
+    # CSSCA constraint traces (for each run)
     try:
-        if cssca_cons_arr.size != 0:
-            # plot first constraint component if present
-            if cssca_cons_arr.ndim == 2:
-                ax2.plot(np.arange(1, cssca_cons_arr.shape[0]+1), cssca_cons_arr[:, 0], linestyle='-', color='purple', label=f'CSSCA g[0] ρ={rho}')
-            else:
-                ax2.plot(np.arange(1, len(cssca_cons_arr)+1), cssca_cons_arr, linestyle='-', color='purple', label=f'CSSCA g ρ={rho}')
+        if 'cssca_runs' in locals() and len(cssca_runs) > 0:
+            # Use the same high-contrast tab10 colors as the objective panel for consistency
+            colors_css = plt.cm.tab10(np.arange(len(cssca_runs)) % 10)
+            for idx, run in enumerate(cssca_runs):
+                carr = run.get('cons_arr', np.array([]))
+                if carr.size == 0:
+                    continue
+                if carr.ndim == 2:
+                    ax2.plot(np.arange(1, carr.shape[0]+1), carr[:, 0], linestyle='-', color=colors_css[idx], linewidth=2.0,
+                             label=f"CSSCA g[0] τo={run['tau_obj']}, τc={run['tau_cons']}")
+                else:
+                    ax2.plot(np.arange(1, len(carr)+1), carr, linestyle='-', color=colors_css[idx], linewidth=2.0,
+                             label=f"CSSCA g τo={run['tau_obj']}, τc={run['tau_cons']}")
     except NameError:
         pass
 
