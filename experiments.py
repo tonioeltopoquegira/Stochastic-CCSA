@@ -752,7 +752,7 @@ def stoch_expquad_diag_exp(
     rho_update_max: int = 6,
     max_outer = 8,
     verbose: bool = True,
-    ccsa_plot_expected: bool = True,
+    ccsa_plot_expected: bool = False,
     ccsa_n_outer: int = 100,
     cssca_tau_obj: float = 1.0, cssca_tau_cons: float = 1.0, cssca_samples_per_iter=None,
     curv_change: str = 'large'
@@ -1041,28 +1041,25 @@ def stoch_expquad_diag_exp(
 
     cssca_runs = []
     for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
-        try:
-            cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                       fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
-                                       g=lambda xx: float(np.dot(c, xx) - b),
-                                       dg=lambda xx: np.atleast_2d(c),
-                                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                       tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
+        
+        cssca_opt = CSSCAOptimizer(params=x0.copy(),
+                                    fun=oracle,
+                                    g=lambda xx: float(np.dot(c, xx) - b),
+                                    dg=lambda xx: np.atleast_2d(c),
+                                    x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                                    tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
 
-            cssca_f_hist = []
-            cssca_cons_hist = []
-            for t in range(mma_maxeval):
-                x_cssca, f_cssca, cons_cssca = cssca_opt.step()
-                cssca_f_hist.append(f_cssca)
-                cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
+        cssca_f_hist = []
+        cssca_cons_hist = []
+        for t in range(mma_maxeval):
+            x_cssca, f_cssca, cons_cssca = cssca_opt.step()
+            cssca_f_hist.append(f_cssca)
+            cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
 
-            cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
-            print(f"CSSCA (tau_obj={tau_o}, tau_cons={tau_c}, rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
-            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": cssca_f_hist, "cons_arr": cssca_cons_arr})
-        except Exception as e:
-            print(f"Failed to run CSSCA optimizer (tau_obj={tau_o}, tau_cons={tau_c}): {e}")
-            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": [], "cons_arr": np.array([])})
-
+        cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
+        print(f"CSSCA (tau_obj={tau_o}, tau_cons={tau_c}, rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
+        cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": cssca_f_hist, "cons_arr": cssca_cons_arr})
+        
     # --- Run CCSA-quad baseline (if provided) ---
     ccsa_quad_results = []
     oracle = make_noisy_f_and_grad(A, sample_xi)
@@ -1084,11 +1081,7 @@ def stoch_expquad_diag_exp(
                 f_b, g_b, metrics = optimizer_quad.step()
                 all_x.append(metrics["x_history"][-1])
 
-            try:
-                optimizer_quad.summarize_diagnostics()
-            except Exception:
-                pass
-
+            
             all_f = [oracle(xi, grad=None) for xi in all_x]
 
             x_hist = np.asarray(metrics.get("x_history", []))
@@ -1214,6 +1207,7 @@ def stoch_expquad_diag_exp(
                     ax1.plot(np.arange(1, len(fh)+1), fh, linestyle='-', linewidth=2.0,
                              color=colors_css[idx], label=f"CSSCA τo={run['tau_obj']}, τc={run['tau_cons']}")
     except NameError:
+        print("Error!!!!")
         pass
 
     ax1.axhspan(val_star - patch_half, val_star + patch_half, alpha=0.18, facecolor='tab:orange')
@@ -1533,11 +1527,6 @@ def stoch_radial_full_run(
                     break
                 all_x.append(metrics["x_history"][-1])
 
-            try:
-                optimizer.summarize_diagnostics()
-            except Exception:
-                pass
-
             all_f_expected = [expected_f(xi) for xi in all_x]
             g_at_xhist = [constraint_val(xi) for xi in all_x] if len(all_x)>0 else []
 
@@ -1586,11 +1575,6 @@ def stoch_radial_full_run(
                 if metrics is None or "x_history" not in metrics:
                     break
                 all_x.append(metrics["x_history"][-1])
-
-            try:
-                optimizer_quad.summarize_diagnostics()
-            except Exception:
-                pass
 
             all_f_expected = [expected_f(xi) for xi in all_x]
             g_at_xhist = [constraint_val(xi) for xi in all_x] if len(all_x)>0 else []
@@ -1789,17 +1773,15 @@ def stoch_radial_full_run(
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', marker='s', markersize=4, color=col, label=f'CCSA-QUAD σ={cr["sigma_min"]}')
 
     # CSSCA runs plotting (if any)
-    try:
-        if 'cssca_runs' in locals() and len(cssca_runs) > 0:
-            colors_css = plt.cm.tab10(np.arange(len(cssca_runs)) % 10)
-            for idx, run in enumerate(cssca_runs):
-                fh = run.get('f_hist', [])
-                if len(fh) > 0:
-                    ax1.plot(np.arange(1, len(fh)+1), fh, linestyle='-', linewidth=2.0,
-                             color=colors_css[idx], label=f"CSSCA τo={run['tau_obj']}, τc={run['tau_cons']}")
-    except Exception:
-        pass
-
+   
+    if 'cssca_runs' in locals() and len(cssca_runs) > 0:
+        colors_css = plt.cm.tab10(np.arange(len(cssca_runs)) % 10)
+        for idx, run in enumerate(cssca_runs):
+            fh = run.get('f_hist', [])
+            if len(fh) > 0:
+                ax1.plot(np.arange(1, len(fh)+1), fh, linestyle='-', linewidth=2.0,
+                            color=colors_css[idx], label=f"CSSCA τo={run['tau_obj']}, τc={run['tau_cons']}")
+   
     # compute val_star safely (numeric) for plotting
     if 'x_star' in locals():
         val_star = expected_f(x_star)
@@ -1817,7 +1799,7 @@ def stoch_radial_full_run(
 
     ax1.set_xscale('log'); ax1.set_yscale('log')
     ax1.grid(True); ax1.set_xlabel('iter/evals'); ax1.set_ylabel('stochastic f(x)'); ax1.set_title('Objective')
-    ax1.set_ylim(bottom=10)
+    ax1.set_ylim(bottom=1e-12, top=1e12)
 
     ax2 = plt.subplot(1,2,2)
     try:
