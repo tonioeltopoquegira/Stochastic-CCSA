@@ -727,11 +727,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from collections import OrderedDict
 
-# imports assumed to exist in your environment (same as previous experiments)
-# from utils import randcond, make_red_colors
-# from baselines.adam import adam
-# from baselines.adam_al import adam_augmented_lagrangian
-# from baselines.cssca.core import CSSCAOptimizer
+
 
 def stoch_expquad_diag_exp(
     optimizer,
@@ -1196,18 +1192,18 @@ def stoch_expquad_diag_exp(
         col = cr.get('color', 'tab:orange')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom σ={cr["sigma_min"]}')
+                     color=col, label=f'custom non-cons σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='o', markersize=4, color=col, label=f'custom σ={cr["sigma_min"]}')
+                     marker='o', markersize=4, color=col, label=f'custom non-cons σ={cr["sigma_min"]}')
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom quad σ={cr["sigma_min"]}')
+                     color=col, label=f'custom cons σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='s', markersize=4, color=col, label=f'custom quad σ={cr["sigma_min"]}')
+                     marker='s', markersize=4, color=col, label=f'custom cons σ={cr["sigma_min"]}')
 
     try:
         if 'cssca_runs' in locals() and len(cssca_runs) > 0:
@@ -1228,7 +1224,7 @@ def stoch_expquad_diag_exp(
         if l not in unique:
             unique[l] = h
     unique[constrained_patch.get_label()] = constrained_patch
-    ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
+    #ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
 
     ax1.axhline(val_star, color='k', linestyle='--', linewidth=1.0)
     ax1.axhline(val_uncon, color='gray', linestyle=':', linewidth=1.0)
