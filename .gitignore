@@ -25,3 +25,12 @@ data/
 # OS files
 .DS_Store
 Thumbs.db
+
+cssca_resources/
+
+*.DS_Store
+
+*.pdf
+
+*.png
+

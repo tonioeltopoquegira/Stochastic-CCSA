@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 from ccsa.params import MMA_RhoParams, MMA_SigmaParams, update_rho
 from ccsa.asymptote import AsymptoteUpdater
 from ccsa.dual import DualSubproblemBuilder
+from ccsa.feasibility_minimization import feasibility_solver
 
 # -------------------------
 # Modular MMA optimizer (flat parameter vector)
@@ -27,7 +28,8 @@ class CCSAOptimizer:
                  use_quadratic_surrogates: bool = False,
                  df: Optional[Callable] = None,
                  dg: Optional[Callable] = None,
-                 x0: Optional[np.ndarray] = None):
+                 x0: Optional[np.ndarray] = None,
+                 conservative = True):
         """
         params: initial flat parameter array (will be copied). If x0 provided, it overrides params.
         fun: callable (x, grad=True) -> (f, df) if grad requested, otherwise fun(x) -> float
@@ -41,6 +43,7 @@ class CCSAOptimizer:
         self.dg = dg
         self.max_inner = int(max_inner)
         self.rho = float(rho_init)      # scalar rho (objective curvature)
+        self.conservative = conservative
 
         self.rho_params = rho_params if rho_params is not None else MMA_RhoParams()
         # if no sigma_params provided, create from legacy small set
@@ -94,7 +97,8 @@ class CCSAOptimizer:
                 "feasible_accept": 0,
                 "infeasible_accept": 0,
                 "improve_only": 0,
-                "reject": 0
+                "reject": 0,
+                "feasibility_min": 0
             }
         }
         self.history = {
@@ -154,6 +158,7 @@ class CCSAOptimizer:
                 "infeasible_accept": 0,
                 "improve_only": 0,
                 "reject": 0,
+                "feasibility_min": 0
             }
         if "sigma_history" not in self.metrics:
             self.metrics["sigma_history"] = []
@@ -216,7 +221,30 @@ class CCSAOptimizer:
                 accept = True
                 accept_type = "infeasible_accept"
             else:
-                accept_type = "reject"
+                # Insert here
+                if not self.conservative:
+                    # run feasibility minimization using current curvature
+                    x_bar, success = feasibility_solver(self.L, self.U, x_k, g_k, grad_g_k, (self.lb, self.ub))
+                    
+                    # evaluate true f and g at x_bar
+                    if self.df is None:
+                        f_bar, grad_f_bar = self.fun(x_bar, grad=True)
+                    else:
+                        f_bar = float(self.fun(x_bar))
+                        grad_f_bar = np.asarray(self.df(x_bar), dtype=float).ravel()
+                    
+                    g_bar = np.atleast_1d(self.g(x_bar)).astype(float) if m > 0 else np.zeros(0, dtype=float)
+                    
+                    # accept the feasibility-minimized point
+                    accept = True
+                    accept_type = 'feasibility_min'
+                    f_best = float(f_bar)
+                    x_best = x_bar.copy()
+                    g_best = g_bar.copy() if m > 0 else np.zeros(0, dtype=float)
+                    grad_f_k = grad_f_bar.copy()
+                    wval_used = 0.0  # feasibility minimization doesn't use w_val in the same way
+                else:
+                    accept_type = "reject"
 
             if accept:
                 f_best = float(f_cur)
