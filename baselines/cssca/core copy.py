@@ -34,7 +34,8 @@ class CSSCAOptimizer:
                  tau_obj: float = 1.0,
                  tau_cons: float = 1.0,
                  samples_per_iter: int = 1,
-                 surrogate_cfg: Optional[RecursiveSurrogateConfig] = None):
+                 surrogate_cfg: Optional[RecursiveSurrogateConfig] = None,
+                 conservative: bool = False):
         if x0 is not None:
             self.x_k = np.asarray(x0, dtype=float).ravel().copy()
         else:
@@ -49,6 +50,7 @@ class CSSCAOptimizer:
         self.tau_obj = float(tau_obj)
         self.tau_cons = float(tau_cons)
         self.t = 0
+        self.conservative = conservative
 
         self.count = 0
         self.count_infeas = 0
@@ -71,16 +73,16 @@ class CSSCAOptimizer:
         # history
         self.history = {'x': [self.x_k.copy()], 'f': [], 'cons': []}
 
-    def _call_fun(self, x, grad=False):
+    def _call_fun(self, x, grad=False, xi=None):
         if grad:
             if self.df is None:
-                return self.fun(x, grad=True)
+                return self.fun(x, xi, grad=True)
             else:
-                return float(self.fun(x)), np.asarray(self.df(x), dtype=float).ravel()
+                return float(self.fun(x, xi)), np.asarray(self.df(x, xi), dtype=float).ravel()
         else:
-            return float(self.fun(x))
+            return float(self.fun(x, xi))
 
-    def _call_g(self, x, jac=False):
+    def _call_g(self, x, jac=False, xi=None):
         if self.g is None:
             if jac:
                 return np.zeros((0, x.size), dtype=float)
@@ -89,18 +91,18 @@ class CSSCAOptimizer:
             if self.dg is None:
                 # user didn't provide jacobian -> finite diff
                 eps = 1e-8
-                gx = np.atleast_1d(self.g(x)).astype(float)
+                gx = np.atleast_1d(self.g(x, xi)).astype(float)
                 m = gx.size
                 jac_mat = np.zeros((m, x.size), dtype=float)
                 for j in range(x.size):
                     ej = np.zeros_like(x); ej[j] = eps
-                    gj = np.atleast_1d(self.g(x + ej)).astype(float)
+                    gj = np.atleast_1d(self.g(x + ej, xi)).astype(float)
                     jac_mat[:, j] = (gj - gx) / eps
                 return jac_mat
             else:
                 return np.atleast_2d(self.dg(x)).astype(float)
         else:
-            return np.atleast_1d(self.g(x)).astype(float)
+            return np.atleast_1d(self.g(x, xi)).astype(float)
 
     def _rho_t(self):
         return self.rho_t_schedule(self.t) if callable(self.rho_t_schedule) else float(self.rho_t_schedule)
@@ -130,19 +132,19 @@ class CSSCAOptimizer:
             # objective sample function wrapper (fun returns f(x, grad?) but surrogate expects sample g0(x, xi) -> scalar)
             def g0_fun(x, xi_local):
                 # user fun should accept grad flag; for sample surrogate we only need scalar
-                return float(self.fun(x))
+                return float(self.fun(x, xi_local))
             def dg0_fun(x, xi_local):
                 if self.df is not None:
-                    return np.asarray(self.df(x), dtype=float).ravel()
+                    return np.asarray(self.df(x, xi_local), dtype=float).ravel()
                 else:
                     # fallback numeric approx via _call_fun
-                    _, grad = self._call_fun(x, grad=True)
+                    _, grad = self._call_fun(x, grad=True, xi=xi_local)
                     return grad
             g_cons_funs = []
             dg_cons_funs = []
             for i in range(self.m):
                 def make_gi(i_local):
-                    return lambda x, xi_l: float(np.atleast_1d(self.g(x))[i_local])
+                    return lambda x, xi_l: float(np.atleast_1d(self.g(x, xi_l))[i_local])
                 def make_dgi(i_local):
                     if self.dg is None:
                         return None
@@ -153,8 +155,8 @@ class CSSCAOptimizer:
 
             # now update surrogates (note: we pass xi but surrogate creation ignores it unless user wants)
             self.surrogates.update_from_sample(self.x_k, xi,
-                                              g_obj_fun=lambda x, xi_l: float(self.fun(x)),
-                                              dg_obj_fun=(lambda x, xi_l: (np.asarray(self.df(x), dtype=float).ravel())) if self.df is not None else None,
+                                              g_obj_fun=lambda x, xi_l: float(self.fun(x, xi_l)),
+                                              dg_obj_fun=(lambda x, xi_l: (np.asarray(self.df(x, xi_l), dtype=float).ravel())) if self.df is not None else None,
                                               g_cons_funs=g_cons_funs,
                                               dg_cons_funs=dg_cons_funs,
                                               rho_t=rho_t,
@@ -170,7 +172,7 @@ class CSSCAOptimizer:
 
             self.count_infeas += 1
 
-            print(self.count_infeas*100.0/self.count, "Percentage of")
+            print(self.count_infeas*100.0/self.count, "Percentage of infeasible iterations")
             
             # minimize alpha s.t. fbar_i(x) <= alpha for i=1..m
             # we simply minimize the maximum surrogate constraint using SLSQP by introducing scalar alpha via variable stacking

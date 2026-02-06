@@ -107,6 +107,7 @@ def stoch_convex_con_exp(
             # Otherwise only value requested
             return val
         return f_and_grad
+
     
     # stochastic helpers that use sample_xi (keeps value/grad consistent if caller uses same xi)
     def fgrad_stoch(x):
@@ -121,8 +122,9 @@ def stoch_convex_con_exp(
         #return float(np.linalg.norm(A.dot(x))**2)
 
 
-    def constraint_val(x):
-        xi = sample_xi()
+    def constraint_val(x, xi=None):
+        if xi is None:
+            xi = sample_xi()
         return float(np.dot(c, x + xi) - b)
 
     # Also provide expected (closed-form) objective for plotting
@@ -228,7 +230,7 @@ def stoch_convex_con_exp(
             f_b, g_b, metrics = optimizer.step()
             all_x.append(metrics["x_history"][-1])
 
-        optimizer.summarize_diagnostics()
+        #optimizer.summarize_diagnostics()
         all_f = [oracle(xi, grad=None) for xi in all_x]
 
         
@@ -290,9 +292,9 @@ def stoch_convex_con_exp(
     for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
         try:
             cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                       fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
-                                       #fun=make_noisy_f_and_grad(A, sample_xi),
-                                       g=lambda xx: float(np.dot(c, xx) - b),
+                                       #fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                                       fun=make_noisy_f_and_grad(A, sample_xi),
+                                       g=lambda xx, xi=None: float(np.dot(c, xx) - b),
                                        dg=lambda xx: np.atleast_2d(c),
                                        x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
                                        tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
@@ -329,7 +331,7 @@ def stoch_convex_con_exp(
             f_b, g_b, metrics = optimizer_quad.step()
             all_x.append(metrics["x_history"][-1])
 
-        optimizer_quad.summarize_diagnostics()
+        #optimizer_quad.summarize_diagnostics()
         all_f = [oracle(xi, grad=None) for xi in all_x]
 
         
