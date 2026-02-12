@@ -44,7 +44,6 @@ class CSSCAOptimizer:
         self.df = df
         self.g = g
         self.dg = dg
-        self.bounds = bounds
         self.samples_per_iter = int(samples_per_iter)
         self.tau_obj = float(tau_obj)
         self.tau_cons = float(tau_cons)
@@ -59,6 +58,15 @@ class CSSCAOptimizer:
         else:
             g0 = self.g(self.x_k)
             self.m = int(np.atleast_1d(g0).size)
+        
+        if bounds is not None:
+            self.bounds = bounds
+        else:
+            B = 400.0
+            lb = -B * np.ones(self.n, dtype=float)
+            ub =  B * np.ones(self.n, dtype=float)
+            self.bounds = (lb, ub)
+
 
         # surrogate manager
         cfg = surrogate_cfg if surrogate_cfg is not None else RecursiveSurrogateConfig(tau_obj=tau_obj, tau_cons=tau_cons)
@@ -66,7 +74,16 @@ class CSSCAOptimizer:
 
         # step schedules
         self.rho_t_schedule = rho_t_schedule
-        self.gamma_t_schedule = gamma_t_schedule
+        # gamma schedule (paper-consistent)
+        if gamma_t_schedule is None:
+            # γ_t = 1 / (t + 10)
+            self.gamma_t_schedule = lambda t: 1.0 / (t + 10.0)
+        elif callable(gamma_t_schedule):
+            self.gamma_t_schedule = gamma_t_schedule
+        else:
+            const_val = float(gamma_t_schedule)
+            self.gamma_t_schedule = lambda t, v=const_val: v
+
 
         # history
         self.history = {'x': [self.x_k.copy()], 'f': [], 'cons': []}
@@ -125,103 +142,188 @@ class CSSCAOptimizer:
         # 1) build/update surrogates using one or multiple samples
         rho_t = self._rho_t()
         # for multiple samples we average the sample surrogates by updating sequentially
-        for s in range(self.samples_per_iter):
+        for _ in range(self.samples_per_iter):
+
+            # draw ONE sample
             xi = sample_drawer()
-            # objective sample function wrapper (fun returns f(x, grad?) but surrogate expects sample g0(x, xi) -> scalar)
+
+            # --- OBJECTIVE WRAPPERS (use same xi everywhere) ---
+
             def g0_fun(x, xi_local):
-                # user fun should accept grad flag; for sample surrogate we only need scalar
-                return float(self.fun(x))
+                try:
+                    return float(self.fun(x, xi_local))
+                except TypeError:
+                    try:
+                        return float(self.fun(x, xi=xi_local))
+                    except TypeError:
+                        return float(self.fun(x))
+
             def dg0_fun(x, xi_local):
                 if self.df is not None:
-                    return np.asarray(self.df(x), dtype=float).ravel()
-                else:
-                    # fallback numeric approx via _call_fun
-                    _, grad = self._call_fun(x, grad=True)
-                    return grad
+                    try:
+                        return np.asarray(self.df(x, xi_local), dtype=float).ravel()
+                    except TypeError:
+                        return np.asarray(self.df(x), dtype=float).ravel()
+
+                # try oracle returning (val, grad)
+                try:
+                    val, grad = self.fun(x, xi_local, True)
+                    return np.asarray(grad, dtype=float).ravel()
+                except TypeError:
+                    try:
+                        val, grad = self.fun(x, xi_local, grad=True)
+                        return np.asarray(grad, dtype=float).ravel()
+                    except TypeError:
+                        _, grad = self._call_fun(x, grad=True)
+                        return np.asarray(grad, dtype=float).ravel()
+
+            # --- CONSTRAINT WRAPPERS ---
+
             g_cons_funs = []
             dg_cons_funs = []
+
             for i in range(self.m):
+
                 def make_gi(i_local):
-                    return lambda x, xi_l: float(np.atleast_1d(self.g(x))[i_local])
+                    def gi(x, xi_l):
+                        try:
+                            return float(np.atleast_1d(self.g(x, xi_l))[i_local])
+                        except TypeError:
+                            return float(np.atleast_1d(self.g(x))[i_local])
+                    return gi
+
                 def make_dgi(i_local):
                     if self.dg is None:
                         return None
                     else:
-                        return lambda x, xi_l: np.atleast_2d(self.dg(x))[i_local, :].ravel()
+                        def dgi(x, xi_l):
+                            try:
+                                return np.atleast_2d(self.dg(x, xi_l))[i_local, :].ravel()
+                            except TypeError:
+                                return np.atleast_2d(self.dg(x))[i_local, :].ravel()
+                        return dgi
+
                 g_cons_funs.append(make_gi(i))
                 dg_cons_funs.append(make_dgi(i))
 
-            # now update surrogates (note: we pass xi but surrogate creation ignores it unless user wants)
-            self.surrogates.update_from_sample(self.x_k, xi,
-                                              g_obj_fun=lambda x, xi_l: float(self.fun(x)),
-                                              dg_obj_fun=(lambda x, xi_l: (np.asarray(self.df(x), dtype=float).ravel())) if self.df is not None else None,
-                                              g_cons_funs=g_cons_funs,
-                                              dg_cons_funs=dg_cons_funs,
-                                              rho_t=rho_t,
-                                              tau_obj=self.tau_obj,
-                                              tau_cons=self.tau_cons)
+            # --- Update surrogate using SAME xi everywhere ---
+            self.surrogates.update_from_sample(
+                self.x_k,
+                xi,
+                g_obj_fun=g0_fun,
+                dg_obj_fun=dg0_fun,
+                g_cons_funs=g_cons_funs,
+                dg_cons_funs=dg_cons_funs,
+                rho_t=rho_t,
+                tau_obj=self.tau_obj,
+                tau_cons=self.tau_cons
+            )
+
+
+            # PRINT ACTUAL TAU'S   
+            #print("taus objective:", self.surrogates.taus[0])
+            #print("taus constraints:", self.surrogates.taus[1:]
 
         # 2) Solve convex subproblem (minimize surrogate objective subject to surrogate constraints)
         x0 = self.x_k.copy()
         x_bar, feasible, info = solve_convex_subproblem_quad(self.surrogates, x0, bounds=self.bounds, **inner_solver_opts)
+    
+
+        ##### DEBUG
+        # --- SURROGATE vs TRUE at x_bar ---
+        fbar_xbar, _ = self.surrogates.eval_surrogate(x_bar)
+        gbar_xbar, _ = self.surrogates.eval_constraints_surrogates(x_bar)
+
+        f_true_bar = self._call_fun(x_bar)
+        g_true_bar = self._call_g(x_bar)
+
+        print("---- x_bar diagnostics ----")
+        print("||x_bar - x_k||:", np.linalg.norm(x_bar - self.x_k))
+        print("x_bar norm:", np.linalg.norm(x_bar))
+        print("max |x_bar|:", np.max(np.abs(x_bar)))
+
+        print("SURROGATE: fbar =", fbar_xbar,
+            "max gbar =", np.max(gbar_xbar))
+
+        print("TRUE:      f =", f_true_bar,
+            "max g =", np.max(g_true_bar))
+        print("----------------------------")
+
 
         # if infeasible, solve feasibility subproblem:
         if not feasible:
 
             self.count_infeas += 1
+            print(self.count_infeas * 100.0 / self.count, "Percentage of")
 
-            print(self.count_infeas*100.0/self.count, "Percentage of")
-            
             # minimize alpha s.t. fbar_i(x) <= alpha for i=1..m
-            # we simply minimize the maximum surrogate constraint using SLSQP by introducing scalar alpha via variable stacking
-            # implement by optimizing over z = [x; alpha] with bounds for alpha large
             def feasibility_solver():
                 n = self.n
+
+                # objective: minimize alpha
                 def obj_z(z):
-                    x = z[:n]
-                    alpha = z[n]
-                    return alpha
+                    return float(z[n])
+
                 def grad_obj_z(z):
-                    g = np.zeros_like(z); g[n] = 1.0; return g
-                # constraints: fbar_i(x) - alpha <= 0  -> as SLSQP 'ineq' we do -(fbar_i - alpha) >= 0
+                    grad = np.zeros_like(z, dtype=float)
+                    grad[n] = 1.0
+                    return grad
+
+                # constraints: alpha - fbar_i(x) >= 0
                 def make_cons_i(i):
                     def cfun(z, idx=i):
                         x = z[:n]
                         alpha = z[n]
                         vals, _ = self.surrogates.eval_constraints_surrogates(x)
-                        return -(vals[idx] - alpha)
+                        return float(alpha - vals[idx])
+
                     def cjac(z, idx=i):
                         x = z[:n]
-                        alpha = z[n]
                         vals, grads = self.surrogates.eval_constraints_surrogates(x)
                         jac = np.zeros(n + 1, dtype=float)
                         jac[:n] = -grads[idx, :]
                         jac[n] = 1.0
                         return jac
+
                     return {'type': 'ineq', 'fun': cfun, 'jac': cjac}
+
                 cons = [make_cons_i(i) for i in range(self.m)]
-                # bounds: keep x within self.bounds, alpha unbounded
-                if self.bounds is not None:
-                    lb, ub = self.bounds
-                    bnds = []
-                    for i in range(n):
-                        bnds.append((None if np.isneginf(lb[i]) else lb[i],
-                                     None if np.isposinf(ub[i]) else ub[i]))
-                else:
-                    bnds = [(None, None)] * n
-                bnds.append((None, None))  # alpha
-                z0 = np.concatenate([self.x_k, np.array([1.0], dtype=float)])
+
+                # box bounds on x
+                lb, ub = self.bounds
+                bnds = []
+                for i in range(n):
+                    bnds.append((float(lb[i]), float(ub[i])))
+
+                # bound alpha (large but finite)
+                bnds.append((-1e6, 1e6))
+
+                # initial guess
+                z0 = np.concatenate([self.x_k.copy(), np.array([0.0], dtype=float)])
+                try:
+                    vals_k, _ = self.surrogates.eval_constraints_surrogates(self.x_k)
+                    if vals_k.size > 0:
+                        z0[n] = float(np.max(vals_k))
+                except Exception:
+                    z0[n] = 0.0
+
                 from scipy.optimize import minimize
-                res = minimize(lambda z: obj_z(z),
-                               z0,
-                               jac=lambda z: grad_obj_z(z),
-                               method='SLSQP',
-                               bounds=bnds,
-                               constraints=cons,
-                               options={'maxiter': 200, 'ftol': 1e-9})
-                return res.x[:n], res.success
+                res = minimize(
+                    obj_z,
+                    z0,
+                    jac=grad_obj_z,
+                    method='SLSQP',
+                    bounds=bnds,
+                    constraints=cons,
+                    options={'maxiter': 500, 'ftol': 1e-9}
+                )
+
+                x_sol = res.x[:n].copy()
+                success = bool(res.success)
+                return x_sol, success
+
             x_bar, feasible_flag = feasibility_solver()
-            # we won't raise if feasibility solver fails; we keep x_bar anyway
+            print("Feasibility solver success:", feasible_flag)
 
         # 3) step update xt+1 = (1 - gamma_t) xt + gamma_t * x_bar
         gamma_t = self._gamma_t()

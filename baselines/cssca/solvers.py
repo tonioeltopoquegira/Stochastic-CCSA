@@ -55,6 +55,12 @@ def solve_convex_subproblem_quad(surrogates, x0: np.ndarray,
                    bounds=bnds,
                    constraints=cons,
                    options={'maxiter': maxiter, 'ftol': 1e-9})
+    
+    print("SLSQP success:", res.success)
+    print("SLSQP message:", res.message)
+    print("SLSQP iterations:", res.nit)
+    print("SLSQP objective value:", res.fun)
+
 
     x_opt = res.x
     # check feasibility: all fbar_i(x_opt) <= feasible_tol
