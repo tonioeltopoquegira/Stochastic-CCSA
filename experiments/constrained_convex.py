@@ -301,7 +301,7 @@ def stoch_convex_con_exp(
 
             cssca_f_hist = []
             cssca_cons_hist = []
-            for t in range(mma_maxeval):
+            for t in range(1000):
                 x_cssca, f_cssca, cons_cssca = cssca_opt.step()
                 cssca_f_hist.append(f_cssca)
                 cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
@@ -452,19 +452,19 @@ def stoch_convex_con_exp(
         col = cr.get('color', 'tab:orange')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom σ={cr["sigma_min"]}')
+                     color='gray', label=f'ccsa other σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='o', markersize=4, color=col, label=f'custom σ={cr["sigma_min"]}')
+                     marker='o', markersize=4, color='gray', label=f'ccsa other σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom quad σ={cr["sigma_min"]}')
+                     color=col, label=f'ccsa quad σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='s', markersize=4, color=col, label=f'custom quad σ={cr["sigma_min"]}')
+                     marker='s', markersize=4, color=col, label=f'ccsa quad σ={cr["sigma_min"]}')
 
     # plot CSSCA runs if available
     try:
@@ -497,7 +497,7 @@ def stoch_convex_con_exp(
         if l not in unique:
             unique[l] = h
     unique[constrained_patch.get_label()] = constrained_patch
-    ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
+    #ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
 
     ax1.axhline(val_star, color='k', linestyle='--', linewidth=1.0)
     ax1.axhline(val_uncon, color='gray', linestyle=':', linewidth=1.0)
@@ -511,7 +511,7 @@ def stoch_convex_con_exp(
     #    ax2.plot(f_evals, g_vals, '.-', color=color, alpha=0.9, label=f'NLOPT σ={sigma_min}')
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA σ={cr["sigma_min"]}')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=f'CCSA OTHER σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
