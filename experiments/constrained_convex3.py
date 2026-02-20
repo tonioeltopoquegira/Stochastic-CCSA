@@ -16,7 +16,7 @@ def rotated_exp_stoch_constrained_exp(
     x0: np.ndarray = None,
     c: np.ndarray = None,
     b: float = 0.0,
-    sigma_mins: list = [0.1],
+    sigma_mins: list = [0.1],  # kept for interface/labels only; no NLopt
     maxiters_adam: int = 10000,
     mma_maxeval: int = 2000,
     rho: float = 1.0,
@@ -123,31 +123,100 @@ def rotated_exp_stoch_constrained_exp(
         verbose=verbose
     )
 
+    # Expected (noise-free) objective for plotting
+    def expected_f(x):
+        return f_det(x)
+
     # ---------------------------------------------------------
-    # NLopt MMA (receives noisy constraint)
+    # CCSA baselines: non-conservative (optimizer) and quadratic (optimizer_quad)
     # ---------------------------------------------------------
-    mma_results = []
-    colors_mma = plt.cm.viridis(np.linspace(0.2, 0.8, len(sigma_mins)))
+    colors_ccsa = plt.cm.inferno(np.linspace(0.2, 0.8, len(sigma_mins)))
+    ccsa_results = []
 
-    for sigma_min, color in zip(sigma_mins, colors_mma):
+    # configure non-conservative CCSA optimizer for this problem
+    optimizer.fun = oracle
+    optimizer.g = constraint_val
+    optimizer.dg = lambda xx: np.atleast_2d(constraint_grad(xx))
+    optimizer.x0 = x0.copy()
+    optimizer.params = x0.copy(),
 
-        evals = 0
-        f_hist, g_hist = [], []
+    for sigma_min, color in zip(sigma_mins, colors_ccsa):
+        metrics = None
+        all_x = []
 
-        def f_and_grad_mma(x, grad):
-            nonlocal evals
-            val = f_det(x) + rng.randn() * noise_std
-            if grad.size > 0:
-                grad[:] = grad_det(x)
-            evals += 1
-            f_hist.append(val)
-            g_hist.append(constraint_val(x))
-            return val
+        for _ in range(mma_maxeval):
+            f_b, g_b, metrics = optimizer.step()
+            all_x.append(metrics["x_history"][-1])
 
-        def cons(x, grad):
-            if grad.size > 0:
-                grad[:] = c
-            return constraint_val(x)
+        x_hist = np.asarray(metrics.get("x_history", []))
+        cum_we_hist = np.asarray(metrics.get("cumulative_weighted_evals_history", []), dtype=float)
+        if x_hist.ndim == 1 and x_hist.size > 0:
+            x_hist = x_hist.reshape((1, -1))
+        if x_hist.shape[0] > 0:
+            f_expected_at_xhist = [expected_f(xi) for xi in x_hist]
+            f_stoch_at_xhist = [oracle(xi) for xi in x_hist]
+            g_at_xhist = [constraint_val(xi) for xi in x_hist]
+        else:
+            f_expected_at_xhist = []
+            f_stoch_at_xhist = []
+            g_at_xhist = []
+        if cum_we_hist.size == 0:
+            cum_we_hist = np.arange(1, len(f_expected_at_xhist) + 1, dtype=float)
+
+        ccsa_results.append({
+            "sigma_min": sigma_min,
+            "color": color,
+            "metrics": metrics,
+            "x_hist": x_hist,
+            "cum_we_hist": cum_we_hist,
+            "f_expected_at_xhist": np.array(f_expected_at_xhist),
+            "f_stoch_at_xhist": np.array(f_stoch_at_xhist),
+            "g_at_xhist": np.array(g_at_xhist)
+        })
+
+    # Quadratic-surrogate CCSA (conservative)
+    colors_ccsa_quad = plt.cm.plasma(np.linspace(0.2, 0.8, len(sigma_mins)))
+    ccsa_quad_results = []
+
+    optimizer_quad.fun = oracle
+    optimizer_quad.g = constraint_val
+    optimizer_quad.dg = lambda xx: np.atleast_2d(constraint_grad(xx))
+    optimizer_quad.x0 = x0.copy()
+    optimizer_quad.params = x0.copy(),
+
+    for sigma_min, color in zip(sigma_mins, colors_ccsa_quad):
+        metrics = None
+        all_x = []
+
+        for _ in range(mma_maxeval):
+            f_b, g_b, metrics = optimizer_quad.step()
+            all_x.append(metrics["x_history"][-1])
+
+        x_hist = np.asarray(metrics.get("x_history", []))
+        cum_we_hist = np.asarray(metrics.get("cumulative_weighted_evals_history", []), dtype=float)
+        if x_hist.ndim == 1 and x_hist.size > 0:
+            x_hist = x_hist.reshape((1, -1))
+        if x_hist.shape[0] > 0:
+            f_expected_at_xhist = [expected_f(xi) for xi in x_hist]
+            f_stoch_at_xhist = [oracle(xi) for xi in x_hist]
+            g_at_xhist = [constraint_val(xi) for xi in x_hist]
+        else:
+            f_expected_at_xhist = []
+            f_stoch_at_xhist = []
+            g_at_xhist = []
+        if cum_we_hist.size == 0:
+            cum_we_hist = np.arange(1, len(f_expected_at_xhist) + 1, dtype=float)
+
+        ccsa_quad_results.append({
+            "sigma_min": sigma_min,
+            "color": color,
+            "metrics": metrics,
+            "x_hist": x_hist,
+            "cum_we_hist": cum_we_hist,
+            "f_expected_at_xhist": np.array(f_expected_at_xhist),
+            "f_stoch_at_xhist": np.array(f_stoch_at_xhist),
+            "g_at_xhist": np.array(g_at_xhist)
+        })
 
     #-------------------------------------------------------
     # CSSCA Tau Sweep (stochastic constraint included)
@@ -169,7 +238,7 @@ def rotated_exp_stoch_constrained_exp(
         cssca_opt = CSSCAOptimizer(
             params=x0.copy(),
             fun=oracle,
-            g=lambda xx: float(np.dot(c, xx) - b + rng.randn()*noise_std_g),
+            g=lambda xx: float(np.dot(c, xx) - b + rng.randn() * noise_std_g),
             dg=lambda xx: np.atleast_2d(c),
             x0=x0.copy(),
             rho_t_schedule=rho,
@@ -204,16 +273,27 @@ def rotated_exp_stoch_constrained_exp(
     ax1 = plt.subplot(1, 2, 1)
     ax1.plot(hist_al['iter'], hist_al['f_est'], 'k-', label="AL-Adam")
 
-    for sigma_min, color, f_hist, g_hist in mma_results:
-        ax1.plot(np.arange(len(f_hist)), f_hist, color=color,
-                 label=f"CCSA σ={sigma_min}")
+    # CCSA (non-conservative)
+    for cr in ccsa_results:
+        col = cr.get('color', 'tab:orange')
+        ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
+                 color='gray', label=f"non-conservative CCSA σ={cr['sigma_min']}")
 
+    # CCSA quadratic (conservative)
+    for cr in ccsa_quad_results:
+        col = cr.get('color', 'tab:green')
+        ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
+                 color=col, label=f"CCSA quad σ={cr['sigma_min']}")
+
+    # CSSCA runs
     for run in cssca_runs:
-        ax1.plot(np.arange(len(run["f_hist"])),
-                 run["f_hist"],
-                 color=run["color"],
-                 linewidth=2,
-                 label=f"CSSCA τ={run['tau_obj']}")
+        ax1.plot(
+            np.arange(1, len(run["f_hist"]) + 1),
+            run["f_hist"],
+            color=run["color"],
+            linewidth=2,
+            label=f"CSSCA {run['tau_obj']}"
+        )
 
     ax1.axhline(-1.0, color='k', linestyle='--')
     ax1.set_title("Objective")
@@ -223,21 +303,31 @@ def rotated_exp_stoch_constrained_exp(
     ax2 = plt.subplot(1, 2, 2)
     ax2.plot(hist_al['iter'], hist_al['g'], 'k-', label="AL-Adam")
 
-    for sigma_min, color, f_hist, g_hist in mma_results:
-        ax2.plot(np.arange(len(g_hist)), g_hist, color=color)
+    for cr in ccsa_results:
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8,
+                 label=f"non-conservative CCSA σ={cr['sigma_min']}")
+
+    for cr in ccsa_quad_results:
+        col = cr.get('color', 'tab:green')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8,
+                 label=f"conservative CCSA σ={cr['sigma_min']}")
 
     for run in cssca_runs:
-        ax2.plot(np.arange(len(run["g_hist"])),
-                 run["g_hist"],
-                 color=run["color"],
-                 linewidth=2)
+        ax2.plot(
+            np.arange(1, len(run["g_hist"]) + 1),
+            run["g_hist"],
+            color=run["color"],
+            linewidth=2,
+            label=f"CSSCA {run['tau_obj']}"
+        )
 
     ax2.axhline(0, color='k', linestyle='--')
     ax2.set_title("Constraint")
     ax2.set_xscale('log')
     ax2.grid(True)
+    ax2.legend(fontsize="small")
 
-    ax1.legend(fontsize="small")
+    #ax1.legend(fontsize="small")
     plt.tight_layout()
     plt.show()
 
@@ -246,7 +336,7 @@ def rotated_exp_stoch_constrained_exp(
         tau=tau,
         a=a,
         c=c,
-        b=b,              # ← this was missing
+        b=b,
         solver_paths=None,
         xlim=(-2, 2),
         ylim=(-2, 2)
@@ -256,6 +346,7 @@ def rotated_exp_stoch_constrained_exp(
     return {
         "x_al": x_al,
         "hist_al": hist_al,
-        "mma_results": mma_results,
+        "ccsa_results": ccsa_results,
+        "ccsa_quad_results": ccsa_quad_results,
         "cssca_runs": cssca_runs
     }
