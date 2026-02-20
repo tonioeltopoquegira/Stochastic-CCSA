@@ -306,13 +306,16 @@ def stoch_expquad_diag_exp(
             print(f"CCSA σ={sigma_min}: cumulative_wval={metrics.get('cumulative_wval', np.nan):.6g}, weighted_evals={metrics.get('weighted_evals', np.nan)}, x_history_len={len(x_hist)}")
 
     # --- Run baseline CSSCA optimizer (single constant rho schedule) ---
+    # Allow cssca_tau_obj and cssca_tau_cons to be scalars or lists; run one config per pair
     cssca_tau_objs_list = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple, np.ndarray)) else [cssca_tau_obj]
     cssca_tau_cons_list = cssca_tau_cons if isinstance(cssca_tau_cons, (list, tuple, np.ndarray)) else [cssca_tau_cons]
+    # samples per iter
     if cssca_samples_per_iter is None:
         cssca_samples_list = [1]
     else:
         cssca_samples_list = cssca_samples_per_iter if isinstance(cssca_samples_per_iter, (list, tuple, np.ndarray)) else [cssca_samples_per_iter]
 
+    # broadcast scalars to common length
     L = max(len(cssca_tau_objs_list), len(cssca_tau_cons_list), len(cssca_samples_list))
     def _broadcast(lst, L):
         if len(lst) == L:
@@ -327,24 +330,28 @@ def stoch_expquad_diag_exp(
 
     cssca_runs = []
     for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
-        
-        cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                    fun=oracle,
-                                    g=lambda xx: float(np.dot(c, xx) - b),
-                                    dg=lambda xx: np.atleast_2d(c),
-                                    x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                    tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
+        try:
+            cssca_opt = CSSCAOptimizer(params=x0.copy(),
+                                       #fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                                       fun=make_noisy_f_and_grad(A, sample_xi),
+                                       g=lambda xx, xi=None: float(np.dot(c, xx) - b),
+                                       dg=lambda xx: np.atleast_2d(c),
+                                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                                       tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
 
-        cssca_f_hist = []
-        cssca_cons_hist = []
-        for t in range(mma_maxeval):
-            x_cssca, f_cssca, cons_cssca = cssca_opt.step()
-            cssca_f_hist.append(f_cssca)
-            cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
+            cssca_f_hist = []
+            cssca_cons_hist = []
+            for t in range(1000):
+                x_cssca, f_cssca, cons_cssca = cssca_opt.step()
+                cssca_f_hist.append(f_cssca)
+                cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))
 
-        cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
-        print(f"CSSCA (tau_obj={tau_o}, tau_cons={tau_c}, rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
-        cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": cssca_f_hist, "cons_arr": cssca_cons_arr})
+            cssca_cons_arr = np.vstack(cssca_cons_hist) if len(cssca_cons_hist) > 0 and np.asarray(cssca_cons_hist).ndim == 2 else np.asarray(cssca_cons_hist)
+            print(f"CSSCA (tau_obj={tau_o}, tau_cons={tau_c}, rho={rho}): last f={cssca_f_hist[-1]:.6g}, last g[0]={cssca_cons_arr[-1,0] if cssca_cons_arr.size>0 else np.nan:.6g}")
+            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": cssca_f_hist, "cons_arr": cssca_cons_arr})
+        except Exception as e:
+            print(f"Failed to run CSSCA optimizer (tau_obj={tau_o}, tau_cons={tau_c}): {e}")
+            cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": [], "cons_arr": np.array([])})
         
     # --- Run CCSA-quad baseline (if provided) ---
     ccsa_quad_results = []
