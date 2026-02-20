@@ -452,10 +452,10 @@ def stoch_convex_con_exp(
         col = cr.get('color', 'tab:orange')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color='gray', label=f'ccsa other σ={cr["sigma_min"]}')
+                     color='gray', label=f'non-conservative ccsa σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='o', markersize=4, color='gray', label=f'ccsa other σ={cr["sigma_min"]}')
+                     marker='o', markersize=4, color='gray', label=f'non-conservative ccsa σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
@@ -483,20 +483,20 @@ def stoch_convex_con_exp(
 
     # shaded patches for stochastic constrained and unconstrained (horizontal bands)
     # constrained: center at val_star
-    ax1.axhspan(val_star - patch_half, val_star + patch_half, alpha=0.18, facecolor='tab:orange')
+    #ax1.axhspan(val_star - patch_half, val_star + patch_half, alpha=0.18, facecolor='tab:orange')
     # unconstrained baseline: center at val_uncon
     #ax1.axhspan(val_uncon - patch_half, val_uncon + patch_half, alpha=0.12, facecolor='tab:gray')
 
     # add legend patches for these bands and deduplicate legend entries (keep order)
-    constrained_patch = mpatches.Patch(facecolor='tab:orange', alpha=0.18, label='stochastic constrained (± noise const)')
+    #constrained_patch = mpatches.Patch(facecolor='tab:orange', alpha=0.18, label='stochastic constrained (± noise const)')
     handles, labels = ax1.get_legend_handles_labels()
     # deduplicate while preserving order
-    from collections import OrderedDict
-    unique = OrderedDict()
-    for h, l in zip(handles, labels):
-        if l not in unique:
-            unique[l] = h
-    unique[constrained_patch.get_label()] = constrained_patch
+    #from collections import OrderedDict
+    #unique = OrderedDict()
+    #for h, l in zip(handles, labels):
+    #    if l not in unique:
+    #        unique[l] = h
+    #unique[constrained_patch.get_label()] = constrained_patch
     #ax1.legend(list(unique.values()), list(unique.keys()), loc='best', fontsize='small')
 
     ax1.axhline(val_star, color='k', linestyle='--', linewidth=1.0)
@@ -506,16 +506,16 @@ def stoch_convex_con_exp(
 
     # constraint panel
     ax2 = plt.subplot(1,2,2)
-    ax2.plot(hist_al['iter'], hist_al['g'], '-', color='black', label='AL-Adam g(x)')
+    ax2.plot(hist_al['iter'], hist_al['g'], '-', color='black', label='AL-Adam')
     #for sigma_min, color, f_evals, g_vals, f_vals in mma_results:
     #    ax2.plot(f_evals, g_vals, '.-', color=color, alpha=0.9, label=f'NLOPT σ={sigma_min}')
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=f'CCSA OTHER σ={cr["sigma_min"]}')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=f'non-conservative ccsa σ={cr["sigma_min"]}')
     
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA QUAD σ={cr["sigma_min"]}')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'conservative ccsa σ={cr["sigma_min"]}')
 
     # CSSCA constraint traces (for each run)
     try:
@@ -528,17 +528,17 @@ def stoch_convex_con_exp(
                     continue
                 if carr.ndim == 2:
                     ax2.plot(np.arange(1, carr.shape[0]+1), carr[:, 0], linestyle='-', color=colors_css[idx], linewidth=2.0,
-                             label=f"CSSCA g[0] τo={run['tau_obj']}, τc={run['tau_cons']}")
+                             label=f"CSSCA τ={run['tau_obj']}")
                 else:
                     ax2.plot(np.arange(1, len(carr)+1), carr, linestyle='-', color=colors_css[idx], linewidth=2.0,
-                             label=f"CSSCA g τo={run['tau_obj']}, τc={run['tau_cons']}")
+                             label=f"CSSCA τ={run['tau_obj']}")
     except NameError:
         pass
 
     ax2.axhline(0, color='k', linestyle='--', label='feasibility')
     ax2.axhline(g_uncon, color='gray', linestyle=':', label='unconstrained g')
     ax2.axhline(constraint_val(x_star), color='k', linestyle='--', linewidth=1.0, label='constrained g')
-    ax2.set_xscale('log'); ax2.grid(True); ax2.set_xlabel('iter/evals'); ax2.set_ylabel('g(x)'); ax2.set_title('Constraint violation')
+    ax2.set_xscale('log'); ax2.grid(True); ax2.set_xlabel('iter/evals'); ax2.set_ylabel('stochastic g(x)'); ax2.set_title('Constraint'); #ax2.set_yscale('log')
     ax2.legend(loc='best', fontsize='small')
 
     plt.tight_layout()

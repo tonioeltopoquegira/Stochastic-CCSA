@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from baselines.adam_al import adam_augmented_lagrangian
 from baselines.cssca.core import CSSCAOptimizer
+from plotting_3D import plot_rotated_2d_objective
 
 
 def rotated_exp_stoch_constrained_exp(
@@ -10,7 +11,8 @@ def rotated_exp_stoch_constrained_exp(
     optimizer_nlopt,
     tau: float = 0.5,
     a: float = 5.0,
-    noise_std: float = 0.05,
+    noise_std: float = 0.05,        # objective noise
+    noise_std_g: float = 0.05,      # constraint noise (NEW)
     seed: int = 0,
     x0: np.ndarray = None,
     c: np.ndarray = None,
@@ -28,8 +30,8 @@ def rotated_exp_stoch_constrained_exp(
     cssca_tau_obj=[0.3, 10.0],
     cssca_tau_cons=[0.3, 10.0],
 ):
+
     rng = np.random.RandomState(seed)
-    n = 2
 
     if x0 is None:
         x0 = np.array([1.5, -1.0])
@@ -47,9 +49,10 @@ def rotated_exp_stoch_constrained_exp(
 
     print(f"Rotation angle θ = {theta:.4f}")
     print(f"Constraint ||c||={np.linalg.norm(c):.4f}, b={b:.4f}")
+    print(f"Objective noise σ_f={noise_std}, Constraint noise σ_g={noise_std_g}")
 
     # ---------------------------------------------------------
-    # Objective
+    # Deterministic objective
     # ---------------------------------------------------------
     def f_det(z):
         z_rot = R @ z
@@ -72,8 +75,11 @@ def rotated_exp_stoch_constrained_exp(
         grad_rot = np.array([df_dx_r, df_dy_r])
         return R.T @ grad_rot
 
+    # ---------------------------------------------------------
+    # Stochastic oracle (objective noise only)
+    # ---------------------------------------------------------
     def oracle(x, grad=None):
-        val = f_det(x) + rng.randn()*noise_std
+        val = f_det(x) + rng.randn() * noise_std
         gval = grad_det(x)
 
         if grad is True:
@@ -87,10 +93,16 @@ def rotated_exp_stoch_constrained_exp(
         return grad_det(x)
 
     def f_stoch(x):
-        return f_det(x) + rng.randn()*noise_std
+        return f_det(x) + rng.randn() * noise_std
 
+    # ---------------------------------------------------------
+    # Stochastic constraint (additive noise)
+    # ---------------------------------------------------------
     def constraint_val(x, xi=None):
-        return float(np.dot(c, x) - b)
+        return float(np.dot(c, x) - b + rng.randn() * noise_std_g)
+
+    def constraint_grad(x):
+        return c   # gradient unchanged (additive noise)
 
     # ---------------------------------------------------------
     # AL-Adam
@@ -99,7 +111,7 @@ def rotated_exp_stoch_constrained_exp(
         fgrad=fgrad,
         x0=x0.copy(),
         g=constraint_val,
-        dg=lambda xx: c,
+        dg=lambda xx: constraint_grad(xx),
         rho=rho,
         lambda0=lambda0,
         f_stoch_estimate=f_stoch,
@@ -113,7 +125,7 @@ def rotated_exp_stoch_constrained_exp(
     )
 
     # ---------------------------------------------------------
-    # NLopt MMA
+    # NLopt MMA (receives noisy constraint)
     # ---------------------------------------------------------
     mma_results = []
     colors_mma = plt.cm.viridis(np.linspace(0.2, 0.8, len(sigma_mins)))
@@ -125,7 +137,7 @@ def rotated_exp_stoch_constrained_exp(
 
         def f_and_grad_mma(x, grad):
             nonlocal evals
-            val = f_det(x) + rng.randn()*noise_std
+            val = f_det(x) + rng.randn() * noise_std
             if grad.size > 0:
                 grad[:] = grad_det(x)
             evals += 1
@@ -138,6 +150,7 @@ def rotated_exp_stoch_constrained_exp(
                 grad[:] = c
             return constraint_val(x)
 
+        optimizer_nlopt.remove_inequality_constraints()
         optimizer_nlopt.add_inequality_constraint(cons, 0.0)
         optimizer_nlopt.set_min_objective(f_and_grad_mma)
         optimizer_nlopt.set_maxeval(mma_maxeval)
@@ -146,25 +159,29 @@ def rotated_exp_stoch_constrained_exp(
         x_mma = optimizer_nlopt.optimize(x0.copy())
         mma_results.append((sigma_min, color, f_hist, g_hist))
 
+        print(f"CCSA σ={sigma_min}, final ||x||={np.linalg.norm(x_mma):.3g}")
+
     # ---------------------------------------------------------
-    # CSSCA Tau Sweep
+    # CSSCA Tau Sweep (stochastic constraint included)
     # ---------------------------------------------------------
-    cssca_tau_objs = cssca_tau_obj if isinstance(cssca_tau_obj, (list,tuple)) else [cssca_tau_obj]
-    cssca_tau_cons = cssca_tau_cons if isinstance(cssca_tau_cons, (list,tuple)) else [cssca_tau_cons]
+    cssca_tau_objs = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple)) else [cssca_tau_obj]
+    cssca_tau_cons = cssca_tau_cons if isinstance(cssca_tau_cons, (list, tuple)) else [cssca_tau_cons]
 
     L = max(len(cssca_tau_objs), len(cssca_tau_cons))
-    if len(cssca_tau_objs)==1: cssca_tau_objs *= L
-    if len(cssca_tau_cons)==1: cssca_tau_cons *= L
+    if len(cssca_tau_objs) == 1:
+        cssca_tau_objs *= L
+    if len(cssca_tau_cons) == 1:
+        cssca_tau_cons *= L
 
     cssca_runs = []
-    colors_css = plt.cm.tab10(np.arange(L)%10)
+    colors_css = plt.cm.tab10(np.arange(L) % 10)
 
-    for idx,(tau_o,tau_c) in enumerate(zip(cssca_tau_objs, cssca_tau_cons)):
+    for idx, (tau_o, tau_c) in enumerate(zip(cssca_tau_objs, cssca_tau_cons)):
 
         cssca_opt = CSSCAOptimizer(
             params=x0.copy(),
             fun=oracle,
-            g=lambda xx: float(np.dot(c,xx)-b),
+            g=lambda xx: float(np.dot(c, xx) - b + rng.randn()*noise_std_g),
             dg=lambda xx: np.atleast_2d(c),
             x0=x0.copy(),
             rho_t_schedule=rho,
@@ -175,10 +192,11 @@ def rotated_exp_stoch_constrained_exp(
         )
 
         f_hist, g_hist = [], []
+
         for _ in range(1000):
             x_cssca, f_cssca, cons_cssca = cssca_opt.step()
             f_hist.append(f_cssca)
-            g_hist.append(cons_cssca[0] if hasattr(cons_cssca,'__len__') else cons_cssca)
+            g_hist.append(cons_cssca[0] if hasattr(cons_cssca, '__len__') else cons_cssca)
 
         cssca_runs.append({
             "tau_obj": tau_o,
@@ -193,32 +211,31 @@ def rotated_exp_stoch_constrained_exp(
     # ---------------------------------------------------------
     # Plot
     # ---------------------------------------------------------
-    plt.figure(figsize=(12,5))
+    plt.figure(figsize=(12, 5))
 
-    ax1 = plt.subplot(1,2,1)
+    ax1 = plt.subplot(1, 2, 1)
     ax1.plot(hist_al['iter'], hist_al['f_est'], 'k-', label="AL-Adam")
 
-    for sigma_min,color,f_hist,g_hist in mma_results:
+    for sigma_min, color, f_hist, g_hist in mma_results:
         ax1.plot(np.arange(len(f_hist)), f_hist, color=color,
-                 label=f"MMA σ={sigma_min}")
+                 label=f"CCSA σ={sigma_min}")
 
     for run in cssca_runs:
         ax1.plot(np.arange(len(run["f_hist"])),
                  run["f_hist"],
                  color=run["color"],
                  linewidth=2,
-                 label=f"CSSCA τo={run['tau_obj']}, τc={run['tau_cons']}")
+                 label=f"CSSCA τ={run['tau_obj']}")
 
     ax1.axhline(-1.0, color='k', linestyle='--')
     ax1.set_title("Objective")
-    ax1.grid(True)
     ax1.set_xscale('log')
-    #ax1.set_yscale('log')
+    ax1.grid(True)
 
-    ax2 = plt.subplot(1,2,2)
+    ax2 = plt.subplot(1, 2, 2)
     ax2.plot(hist_al['iter'], hist_al['g'], 'k-', label="AL-Adam")
 
-    for sigma_min,color,f_hist,g_hist in mma_results:
+    for sigma_min, color, f_hist, g_hist in mma_results:
         ax2.plot(np.arange(len(g_hist)), g_hist, color=color)
 
     for run in cssca_runs:
@@ -229,13 +246,24 @@ def rotated_exp_stoch_constrained_exp(
 
     ax2.axhline(0, color='k', linestyle='--')
     ax2.set_title("Constraint")
-    ax2.grid(True)
     ax2.set_xscale('log')
-    #ax2.set_yscale('log')
+    ax2.grid(True)
 
     ax1.legend(fontsize="small")
     plt.tight_layout()
     plt.show()
+
+    plot_rotated_2d_objective(
+        R=R,
+        tau=tau,
+        a=a,
+        c=c,
+        b=b,              # ← this was missing
+        solver_paths=None,
+        xlim=(-2, 2),
+        ylim=(-2, 2)
+    )
+
 
     return {
         "x_al": x_al,

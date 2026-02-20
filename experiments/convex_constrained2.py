@@ -515,10 +515,10 @@ def stoch_expquad_diag_exp(
     ax2.plot(hist_al['iter'], hist_al['g'], '-', color='black', label='AL-Adam g(x)')
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA σ={cr["sigma_min"]}')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=f'CCSA non-conservative σ={cr["sigma_min"]}')
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA QUAD σ={cr["sigma_min"]}')
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA conservative σ={cr["sigma_min"]}')
 
     # CSSCA constraint traces (for each run)
     try:
@@ -530,10 +530,10 @@ def stoch_expquad_diag_exp(
                     continue
                 if carr.ndim == 2:
                     ax2.plot(np.arange(1, carr.shape[0]+1), carr[:, 0], linestyle='-', color=colors_css[idx], linewidth=2.0,
-                             label=f"CSSCA g[0] τo={run['tau_obj']}, τc={run['tau_cons']}")
+                             label=f"CSSCA τ={run['tau_obj']}")
                 else:
                     ax2.plot(np.arange(1, len(carr)+1), carr, linestyle='-', color=colors_css[idx], linewidth=2.0,
-                             label=f"CSSCA g τo={run['tau_obj']}, τc={run['tau_cons']}")
+                             label=f"CSSCA τ={run['tau_obj']}")
     except NameError:
         pass
 
