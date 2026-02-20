@@ -8,7 +8,6 @@ from plotting_3D import plot_rotated_2d_objective
 def rotated_exp_stoch_constrained_exp(
     optimizer,
     optimizer_quad,
-    optimizer_nlopt,
     tau: float = 0.5,
     a: float = 5.0,
     noise_std: float = 0.05,        # objective noise
@@ -150,18 +149,7 @@ def rotated_exp_stoch_constrained_exp(
                 grad[:] = c
             return constraint_val(x)
 
-        optimizer_nlopt.remove_inequality_constraints()
-        optimizer_nlopt.add_inequality_constraint(cons, 0.0)
-        optimizer_nlopt.set_min_objective(f_and_grad_mma)
-        optimizer_nlopt.set_maxeval(mma_maxeval)
-        optimizer_nlopt.set_param("sigma_min", float(sigma_min))
-
-        x_mma = optimizer_nlopt.optimize(x0.copy())
-        mma_results.append((sigma_min, color, f_hist, g_hist))
-
-        print(f"CCSA σ={sigma_min}, final ||x||={np.linalg.norm(x_mma):.3g}")
-
-    # ---------------------------------------------------------
+    #-------------------------------------------------------
     # CSSCA Tau Sweep (stochastic constraint included)
     # ---------------------------------------------------------
     cssca_tau_objs = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple)) else [cssca_tau_obj]
