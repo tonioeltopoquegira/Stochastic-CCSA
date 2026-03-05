@@ -97,26 +97,36 @@ def stoch_expquad_diag_exp(
 
     print(f"Linear constraint: ||c||={np.linalg.norm(c):.6g}, b={b:.6g}")
 
-    # --- Exact expectation constants (diagonal case) ---
-    # log determinant term for expectation prefactor
-    log_det_term = -0.5 * np.sum(np.log(d))     # log(1 / sqrt(prod_i d_i))
-    # m_tilde diag = m_i / d_i used to form quadratic in exponent for expected minimization
-    m_tilde = m / d
+    # --- Introduce a small random rotation
+    
+    i_rot, j_rot = rng.choice(n, size=2, replace=False)
+    theta = rng.uniform(-0.3, 0.3)  # small rotation angle
+    cth, sth = np.cos(theta), np.sin(theta)
+    R = np.eye(n)
+    R_block = np.array([[cth, -sth], [sth, cth]])
+    R[np.ix_([i_rot, j_rot], [i_rot, j_rot])] = R_block
 
-    # Expected objective (exact, diagonal case)
+
+    A_rot = A.dot(R)
+
+    log_det_term = -0.5 * np.sum(np.log(d))     # log(1 / sqrt(prod_i d_i))
+    # diagonal m_tilde = m_i / d_i, then lift to full matrix via rotation:
+    m_tilde_diag = m / d
+    M_tilde_full = R.T @ np.diag(m_tilde_diag) @ R
+
+    # Expected objective (exact, with rotation)
     def expected_f(x):
-        expo = np.sum(m * (x**2) / d)   # sum_i m_i x_i^2 / d_i
+        expo = float(x.T @ (M_tilde_full @ x))
         return float(np.exp(log_det_term + expo))
 
-    # Expected constraint (exact)
+    # Expected constraint (exact, unchanged by rotation of objective)
     def expected_g(x):
         return float(np.dot(c, x) - b)
 
     # Analytic expected minimizer under linear constraint for quadratic exponent:
-    # minimize x^T diag(m_tilde) x subject to c^T x <= b
-    def analytic_solution_expectation_diag(mtilde_diag, c_vec, b_scalar):
-        D = np.diag(mtilde_diag)
-        s = np.linalg.solve(D, c_vec)     # D^{-1} c
+    # minimize x^T M_tilde_full x subject to c^T x <= b
+    def analytic_solution_expectation(Mtilde_full, c_vec, b_scalar):
+        s = np.linalg.solve(Mtilde_full, c_vec)     # Mtilde_full^{-1} c
         denom = float(c_vec.dot(s))
         if b_scalar >= 0:
             x_star = np.zeros_like(c_vec)
@@ -129,7 +139,7 @@ def stoch_expquad_diag_exp(
         val = expected_f(x_star)
         return x_star, lambda_star, active_flag, val
 
-    x_star, lambda_star, active_flag, val_star = analytic_solution_expectation_diag(m_tilde, c, b)
+    x_star, lambda_star, active_flag, val_star = analytic_solution_expectation(M_tilde_full, c, b)
     print("Analytic expected optimum (on expectation):")
     print(f"  active? {active_flag}")
     print(f"  ||x*||={np.linalg.norm(x_star):.6g}, λ*={lambda_star:.6g}")
@@ -145,7 +155,7 @@ def stoch_expquad_diag_exp(
 
     # single-call noisy oracle factory: returns a function f_and_grad(x, grad=None)
     def make_noisy_f_and_grad(A_mat, sample_xi_fn):
-        # A_mat is diag(sqrt(m)) so quadratic = ||A (x+xi)||^2 = (x+xi)^T M (x+xi)
+        # A_mat is A_rot so quadratic = ||A_rot (x+xi)||^2 = (x+xi)^T R^T M R (x+xi)
         def f_and_grad(x, grad=None):
             xi = sample_xi_fn()
             z = x + xi
@@ -478,7 +488,7 @@ def stoch_expquad_diag_exp(
         col = cr.get('color', 'tab:orange')
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom non-cons σ={cr["sigma_min"]}')
+                     color='gray', label=f'custom non-cons σ={cr["sigma_min"]}')
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
                      marker='o', markersize=4, color=col, label=f'custom non-cons σ={cr["sigma_min"]}')
