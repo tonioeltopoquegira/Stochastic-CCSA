@@ -41,7 +41,8 @@ def stoch_expquad_diag_exp(
     ccsa_plot_expected: bool = False,
     ccsa_n_outer: int = 100,
     cssca_tau_obj: float = 1.0, cssca_tau_cons: float = 1.0, cssca_samples_per_iter=None,
-    curv_change: str = 'large'
+    curv_change: str = 'large',
+    ccsa_names=None
 ):
     """
     Stochastic constrained experiment using diagonal exponential-quadratic objective:
@@ -336,13 +337,14 @@ def stoch_expquad_diag_exp(
     cssca_runs = []
     for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
         try:
+            # Provide CSSCA with a stochastic constraint evaluator that accepts xi
             cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                       #fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
-                                       fun=make_noisy_f_and_grad(A, sample_xi),
-                                       g=lambda xx, xi=None: float(np.dot(c, xx) - b),
-                                       dg=lambda xx: np.atleast_2d(c),
-                                       x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                       tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
+                           #fun=make_noisy_f_and_grad(A, lambda: np.zeros(n)),
+                           fun=make_noisy_f_and_grad(A, sample_xi),
+                           g=lambda xx, xi=None: float(np.dot(c, xx + (xi if xi is not None else sample_xi())) - b),
+                           dg=lambda xx: np.atleast_2d(c),
+                           x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                           tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
 
             cssca_f_hist = []
             cssca_cons_hist = []
@@ -478,22 +480,28 @@ def stoch_expquad_diag_exp(
     ax1 = plt.subplot(1,2,1)
     ax1.plot(hist_al['iter'], hist_al['f_est'], '-', color='black', label='AL-Adam')
 
+    # allow caller to provide custom names for CCSA variants
+    if ccsa_names is None:
+        ccsa_names = ["custom non-cons", "custom cons"]
+
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
+        label0 = f"{ccsa_names[0]} σ={cr['sigma_min']}" if len(ccsa_names) > 0 else f"custom non-cons σ={cr['sigma_min']}"
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color='gray', label=f'custom non-cons σ={cr["sigma_min"]}')
+                     color='gray', label=label0)
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='o', markersize=4, color=col, label=f'custom non-cons σ={cr["sigma_min"]}')
+                     marker='o', markersize=4, color=col, label=label0)
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
+        label1 = f"{ccsa_names[1]} σ={cr['sigma_min']}" if len(ccsa_names) > 1 else f"custom cons σ={cr['sigma_min']}"
         if ccsa_plot_expected:
             ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=f'custom cons σ={cr["sigma_min"]}')
+                     color=col, label=label1)
         else:
             ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='s', markersize=4, color=col, label=f'custom cons σ={cr["sigma_min"]}')
+                     marker='s', markersize=4, color=col, label=label1)
 
     try:
         if 'cssca_runs' in locals() and len(cssca_runs) > 0:
@@ -526,10 +534,12 @@ def stoch_expquad_diag_exp(
     ax2.plot(hist_al['iter'], hist_al['g'], '-', color='black', label='AL-Adam g(x)')
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=f'CCSA non-conservative σ={cr["sigma_min"]}')
+        label0 = f"{ccsa_names[0]} σ={cr['sigma_min']}" if len(ccsa_names) > 0 else f"CCSA non-conservative σ={cr['sigma_min']}"
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8, label=label0)
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
-        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=f'CCSA conservative σ={cr["sigma_min"]}')
+        label1 = f"{ccsa_names[1]} σ={cr['sigma_min']}" if len(ccsa_names) > 1 else f"CCSA conservative σ={cr['sigma_min']}"
+        ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8, label=label1)
 
     # CSSCA constraint traces (for each run)
     try:

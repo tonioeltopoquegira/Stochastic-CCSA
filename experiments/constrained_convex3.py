@@ -28,6 +28,7 @@ def rotated_exp_stoch_constrained_exp(
     verbose: bool = True,
     cssca_tau_obj=[0.3, 10.0],
     cssca_tau_cons=[0.3, 10.0],
+    ccsa_names=None
 ):
 
     rng = np.random.RandomState(seed)
@@ -288,18 +289,24 @@ def rotated_exp_stoch_constrained_exp(
     ax1.plot(x_axis_al, f_obs_al, 'k-', label="AL-Adam (obs)")
 
     # CCSA (non-conservative)
+    # prepare CCSA labels; support custom names passed by caller
+    if ccsa_names is None:
+        ccsa_names = ["non-conservative CCSA", "conservative CCSA quad"]
+
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
         # plot observed (noisy) objective values for consistency
+        label0 = f"{ccsa_names[0]} (obs) σ={cr['sigma_min']}" if len(ccsa_names) > 0 else f"CCSA (obs) σ={cr['sigma_min']}"
         ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=2.0,
-                 color='gray', label=f"non-conservative CCSA (obs) σ={cr['sigma_min']}")
+                 color='gray', label=label0)
 
     # CCSA quadratic (conservative)
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
         # plot observed (noisy) objective values for consistency
+        label1 = f"{ccsa_names[1]} (obs) σ={cr['sigma_min']}" if len(ccsa_names) > 1 else f"CCSA quad (obs) σ={cr['sigma_min']}"
         ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=2.0,
-                 color=col, label=f"CCSA quad (obs) σ={cr['sigma_min']}")
+                 color=col, label=label1)
 
     # CSSCA runs
     for run in cssca_runs:
@@ -320,13 +327,15 @@ def rotated_exp_stoch_constrained_exp(
     ax2.plot(hist_al['iter'], hist_al['g'], 'k-', label="AL-Adam")
 
     for cr in ccsa_results:
+        label0 = f"{ccsa_names[0]} σ={cr['sigma_min']}" if len(ccsa_names) > 0 else f"CCSA σ={cr['sigma_min']}"
         ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color='gray', linewidth=1.8,
-                 label=f"non-conservative CCSA σ={cr['sigma_min']}")
+                 label=label0)
 
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
+        label1 = f"{ccsa_names[1]} σ={cr['sigma_min']}" if len(ccsa_names) > 1 else f"CCSA quad σ={cr['sigma_min']}"
         ax2.plot(cr['cum_we_hist'], cr['g_at_xhist'], linestyle='-', color=col, linewidth=1.8,
-                 label=f"conservative CCSA σ={cr['sigma_min']}")
+                 label=label1)
 
     for run in cssca_runs:
         ax2.plot(

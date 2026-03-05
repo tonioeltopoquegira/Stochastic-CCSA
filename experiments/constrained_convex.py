@@ -287,12 +287,13 @@ def stoch_convex_con_exp(
     cssca_runs = []
     for tau_o, tau_c, samples_p in zip(cssca_tau_objs_list, cssca_tau_cons_list, cssca_samples_list):
        
+        # Provide CSSCA with a stochastic constraint evaluator that accepts xi
         cssca_opt = CSSCAOptimizer(params=x0.copy(),
-                                    fun=make_noisy_f_and_grad(A, sample_xi),
-                                    g=lambda xx, xi=None: float(np.dot(c, xx) - b),
-                                    dg=lambda xx: np.atleast_2d(c),
-                                    x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
-                                    tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
+                        fun=make_noisy_f_and_grad(A, sample_xi),
+                        g=lambda xx, xi=None: float(np.dot(c, xx + (xi if xi is not None else sample_xi())) - b),
+                        dg=lambda xx: np.atleast_2d(c),
+                        x0=x0.copy(), rho_t_schedule=float(rho), gamma_t_schedule=1.0,
+                        tau_obj=float(tau_o), tau_cons=float(tau_c), samples_per_iter=1.0)
 
         cssca_f_hist = []
         cssca_cons_hist = []
