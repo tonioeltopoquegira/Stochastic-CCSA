@@ -45,7 +45,7 @@ def stoch_expquad_diag_exp(
 ):
     """
     Stochastic constrained experiment using diagonal exponential-quadratic objective:
-        f(x+xi) = exp( (x+xi)^T M (x+xi) ), M diagonal
+        f(x+xi) = R exp( (x+xi)^T M (x+xi) ), M diagonal, R rotation
     Diagonal noise xi ~ N(0, noise^2 I) so we can compute exact expectation.
 
     Keeps structure and plotting of your original stoch_convex_con_exp and
@@ -59,7 +59,7 @@ def stoch_expquad_diag_exp(
     n = 100
 
     if curv_change == 'small':
-        # choose diagonal curvatures m_i (small values to keep 1 - 2 sigma^2 m_i > 0)
+        # choose diagonal curvatures m_i 
         m_min = 0.005
         m_max = 0.05 * max(1, cond)
         m = np.linspace(m_min, m_max, n)   # diagonal values of M
@@ -72,16 +72,13 @@ def stoch_expquad_diag_exp(
 
     # A such that quadratic = ||A (x+xi)||^2 and M = A.T @ A
     A = np.diag(np.sqrt(m))
-    M = np.diag(m)
 
     # noise: scalar -> isotropic diagonal with variance noise^2
     Sigma_diag = (noise**2) * np.ones(n)
 
     # stability: require d_i = 1 - 2 sigma^2 m_i > 0 for exact expectation formula
     d = 1.0 - 2.0 * (noise**2) * m
-    if np.any(d <= 0.0):
-        raise ValueError("Require 1 - 2 * noise^2 * m_i > 0 for all i. Reduce noise or curvatures m.")
-
+    
     # logging
     print(f"Using diagonal exponential-quadratic objective n={n}, noise={noise}, m in [{m_min:.4g},{m_max:.4g}]")
 
@@ -97,10 +94,10 @@ def stoch_expquad_diag_exp(
 
     print(f"Linear constraint: ||c||={np.linalg.norm(c):.6g}, b={b:.6g}")
 
-    # --- Introduce a small random rotation
+    # Introduce a random rotation
     
     i_rot, j_rot = rng.choice(n, size=2, replace=False)
-    theta = rng.uniform(-0.3, 0.3)  # small rotation angle
+    theta = rng.uniform(-0.3, 0.3)  # rotation angle
     cth, sth = np.cos(theta), np.sin(theta)
     R = np.eye(n)
     R_block = np.array([[cth, -sth], [sth, cth]])
@@ -124,7 +121,6 @@ def stoch_expquad_diag_exp(
         return float(np.dot(c, x) - b)
 
     # Analytic expected minimizer under linear constraint for quadratic exponent:
-    # minimize x^T M_tilde_full x subject to c^T x <= b
     def analytic_solution_expectation(Mtilde_full, c_vec, b_scalar):
         s = np.linalg.solve(Mtilde_full, c_vec)     # Mtilde_full^{-1} c
         denom = float(c_vec.dot(s))
@@ -149,11 +145,11 @@ def stoch_expquad_diag_exp(
     g_uncon = -b
     print(f"Unconstrained baseline: E[f(0)]= {val_uncon:.6g}, g(0)={g_uncon:.6g}")
 
-    # --- deterministic sampling closure used by all function/grad calls in this run ---
+    # Sampling closure used by all function/grad calls in this run ---
     def sample_xi():
         return rng.randn(n) * noise
 
-    # single-call noisy oracle factory: returns a function f_and_grad(x, grad=None)
+    # Noisy oracle: returns a function f_and_grad(x, grad=None)
     def make_noisy_f_and_grad(A_mat, sample_xi_fn):
         # A_mat is A_rot so quadratic = ||A_rot (x+xi)||^2 = (x+xi)^T R^T M R (x+xi)
         def f_and_grad(x, grad=None):
@@ -253,7 +249,7 @@ def stoch_expquad_diag_exp(
         print(f"nlopt σ={sigma_min}: res={res_code}, ||x||={np.linalg.norm(x_mma):.3g}, g(x)={constraint_val(x_mma):.3g}")
         mma_results.append((sigma_min, color, mma_f_evals, mma_g_vals, mma_f_vals))
 
-    # --- Run custom CCSA (if provided) ---
+    # Run custom CCSA 
     colors_ccsa = plt.cm.inferno(np.linspace(0.2, 0.8, len(sigma_mins)))
     ccsa_results = []
 
@@ -315,17 +311,16 @@ def stoch_expquad_diag_exp(
             })
             print(f"CCSA σ={sigma_min}: cumulative_wval={metrics.get('cumulative_wval', np.nan):.6g}, weighted_evals={metrics.get('weighted_evals', np.nan)}, x_history_len={len(x_hist)}")
 
-    # --- Run baseline CSSCA optimizer (single constant rho schedule) ---
-    # Allow cssca_tau_obj and cssca_tau_cons to be scalars or lists; run one config per pair
+    # Run baseline CSSCA 
     cssca_tau_objs_list = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple, np.ndarray)) else [cssca_tau_obj]
     cssca_tau_cons_list = cssca_tau_cons if isinstance(cssca_tau_cons, (list, tuple, np.ndarray)) else [cssca_tau_cons]
-    # samples per iter
+    
     if cssca_samples_per_iter is None:
         cssca_samples_list = [1]
     else:
         cssca_samples_list = cssca_samples_per_iter if isinstance(cssca_samples_per_iter, (list, tuple, np.ndarray)) else [cssca_samples_per_iter]
 
-    # broadcast scalars to common length
+    # Not strictly needed
     L = max(len(cssca_tau_objs_list), len(cssca_tau_cons_list), len(cssca_samples_list))
     def _broadcast(lst, L):
         if len(lst) == L:
@@ -363,7 +358,7 @@ def stoch_expquad_diag_exp(
             print(f"Failed to run CSSCA optimizer (tau_obj={tau_o}, tau_cons={tau_c}): {e}")
             cssca_runs.append({"tau_obj": tau_o, "tau_cons": tau_c, "f_hist": [], "cons_arr": np.array([])})
         
-    # --- Run CCSA-quad baseline (if provided) ---
+    # Run CCSA-quad 
     ccsa_quad_results = []
     oracle = make_noisy_f_and_grad(A, sample_xi)
     if optimizer_quad is not None:
@@ -414,7 +409,7 @@ def stoch_expquad_diag_exp(
             })
             print(f"CCSA σ={sigma_min}: cumulative_wval={metrics.get('cumulative_wval', np.nan):.6g}, weighted_evals={metrics.get('weighted_evals', np.nan)}, x_history_len={len(x_hist)}")
 
-    # --- ensure first plotted value reflects x0 for all traces (same helpers as original) ---
+    # PLOTTING & HELPERS
     init_f_expected = expected_f(x0)
     init_f_stoch = f_stoch_estimate(x0) if 'f_stoch_estimate' in locals() else expected_f(x0)
     init_g_nom = float(np.dot(c, x0) - b)
@@ -477,7 +472,6 @@ def stoch_expquad_diag_exp(
             except Exception:
                 pass
 
-    # --- plotting (similar to original) ---
     plt.figure(figsize=(12,5))
     patch_half = max(1e-12, 0.5 * (noise**2) * np.sum(m))
 

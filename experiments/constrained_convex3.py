@@ -37,9 +37,8 @@ def rotated_exp_stoch_constrained_exp(
     if c is None:
         c = np.array([1.0, -1.0])
 
-    # ---------------------------------------------------------
+    
     # Rotation
-    # ---------------------------------------------------------
     theta = rng.uniform(0, 2*np.pi)
     R = np.array([
         [np.cos(theta), -np.sin(theta)],
@@ -50,9 +49,7 @@ def rotated_exp_stoch_constrained_exp(
     print(f"Constraint ||c||={np.linalg.norm(c):.4f}, b={b:.4f}")
     print(f"Objective noise σ_f={noise_std}, Constraint noise σ_g={noise_std_g}")
 
-    # ---------------------------------------------------------
     # Deterministic objective
-    # ---------------------------------------------------------
     def f_det(z):
         z_rot = R @ z
         x_r, y_r = z_rot
@@ -74,9 +71,8 @@ def rotated_exp_stoch_constrained_exp(
         grad_rot = np.array([df_dx_r, df_dy_r])
         return R.T @ grad_rot
 
-    # ---------------------------------------------------------
-    # Stochastic oracle (objective noise only)
-    # ---------------------------------------------------------
+    
+    # Stochastic oracle (additive noise)
     def oracle(x, grad=None):
         val = f_det(x) + rng.randn() * noise_std
         gval = grad_det(x)
@@ -94,18 +90,16 @@ def rotated_exp_stoch_constrained_exp(
     def f_stoch(x):
         return f_det(x) + rng.randn() * noise_std
 
-    # ---------------------------------------------------------
+    
     # Stochastic constraint (additive noise)
-    # ---------------------------------------------------------
     def constraint_val(x, xi=None):
         return float(np.dot(c, x) - b + rng.randn() * noise_std_g)
 
     def constraint_grad(x):
         return c   # gradient unchanged (additive noise)
 
-    # ---------------------------------------------------------
+    
     # AL-Adam
-    # ---------------------------------------------------------
     x_al, lam_al, hist_al = adam_augmented_lagrangian(
         fgrad=fgrad,
         x0=x0.copy(),
@@ -127,13 +121,12 @@ def rotated_exp_stoch_constrained_exp(
     def expected_f(x):
         return f_det(x)
 
-    # ---------------------------------------------------------
-    # CCSA baselines: non-conservative (optimizer) and quadratic (optimizer_quad)
-    # ---------------------------------------------------------
+   
+    # CCSA: non-conservative (optimizer) and quadratic (optimizer_quad)
     colors_ccsa = plt.cm.inferno(np.linspace(0.2, 0.8, len(sigma_mins)))
     ccsa_results = []
 
-    # configure non-conservative CCSA optimizer for this problem
+    # configure non-conservative CCSA optimizer 
     optimizer.fun = oracle
     optimizer.g = constraint_val
     optimizer.dg = lambda xx: np.atleast_2d(constraint_grad(xx))
@@ -218,9 +211,8 @@ def rotated_exp_stoch_constrained_exp(
             "g_at_xhist": np.array(g_at_xhist)
         })
 
-    #-------------------------------------------------------
-    # CSSCA Tau Sweep (stochastic constraint included)
-    # ---------------------------------------------------------
+    
+    # CSSCA Tau Sweep
     cssca_tau_objs = cssca_tau_obj if isinstance(cssca_tau_obj, (list, tuple)) else [cssca_tau_obj]
     cssca_tau_cons = cssca_tau_cons if isinstance(cssca_tau_cons, (list, tuple)) else [cssca_tau_cons]
 
@@ -265,25 +257,49 @@ def rotated_exp_stoch_constrained_exp(
 
         print(f"CSSCA τo={tau_o}, τc={tau_c}, final f={f_hist[-1]:.4f}")
 
-    # ---------------------------------------------------------
+    
     # Plot
-    # ---------------------------------------------------------
     plt.figure(figsize=(12, 5))
 
     ax1 = plt.subplot(1, 2, 1)
-    ax1.plot(hist_al['iter'], hist_al['f_est'], 'k-', label="AL-Adam")
+    # Prefer plotting observed (noisy) objective values for AL-Adam if recorded;
+    # fall back to internal estimate if necessary.
+    al_x_list = None
+    for k in ('x', 'x_hist', 'x_history'):
+        if k in hist_al and len(hist_al[k]) > 0:
+            al_x_list = hist_al[k]
+            break
+    if al_x_list is not None and len(al_x_list) > 0:
+        try:
+            f_obs_al = np.array([oracle(np.asarray(xx)) for xx in al_x_list], dtype=float)
+        except Exception:
+            f_obs_al = np.asarray(hist_al.get('f_est', []), dtype=float)
+    else:
+        f_obs_al = np.asarray(hist_al.get('f_est', []), dtype=float)
+
+    # If lengths mismatch, align to x-axis length
+    x_axis_al = np.asarray(hist_al.get('iter', np.arange(1, f_obs_al.size + 1)), dtype=float)
+    if x_axis_al.size != f_obs_al.size:
+        # try to trim or pad f_obs_al to match axis
+        n = min(x_axis_al.size, f_obs_al.size)
+        x_axis_al = x_axis_al[:n]
+        f_obs_al = f_obs_al[:n]
+
+    ax1.plot(x_axis_al, f_obs_al, 'k-', label="AL-Adam (obs)")
 
     # CCSA (non-conservative)
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
-        ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
-                 color='gray', label=f"non-conservative CCSA σ={cr['sigma_min']}")
+        # plot observed (noisy) objective values for consistency
+        ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=2.0,
+                 color='gray', label=f"non-conservative CCSA (obs) σ={cr['sigma_min']}")
 
     # CCSA quadratic (conservative)
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
-        ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.0,
-                 color=col, label=f"CCSA quad σ={cr['sigma_min']}")
+        # plot observed (noisy) objective values for consistency
+        ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=2.0,
+                 color=col, label=f"CCSA quad (obs) σ={cr['sigma_min']}")
 
     # CSSCA runs
     for run in cssca_runs:
@@ -327,7 +343,6 @@ def rotated_exp_stoch_constrained_exp(
     ax2.grid(True)
     ax2.legend(fontsize="small")
 
-    #ax1.legend(fontsize="small")
     plt.tight_layout()
     plt.show()
 
