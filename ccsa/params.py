@@ -104,51 +104,88 @@ def adam_curv_update(state: dict, grad: np.ndarray, curv: float, params: AdamCur
     return new_curv, new_state
 
 
-def adam_curv_update_scalar(state: dict, signal: float, curv: float, params: AdamCurvParams):
-        """
-        Adam-like update for scalar signal (e.g., per-constraint violation magnitude).
+def init_adam_curv_state():
+    """Initialize Adam-like state for curvature adaptation (violation or secant)."""
+    return {'m': 0.0, 'v': 0.0, 't': 0}
 
-        Args:
-            state: dict with keys 'm','v','t','last_signal' (will be updated)
-            signal: scalar signal (float)
-            curv: current scalar curvature
-            params: AdamCurvParams
 
-        Returns:
-            (new_curv, new_state)
-        """
-        import math as _math
+def adam_secant_update(state: dict, grad_new: np.ndarray, grad_old: np.ndarray,
+                       x_new: np.ndarray, x_old: np.ndarray,
+                       curv: float, params: AdamCurvParams):
+    """
+    Adam-smoothed diagonal secant curvature estimate.
 
-        if signal is None:
-                return float(curv), state
+    Computes per-component secant: s_i = (grad_new_i - grad_old_i) / (x_new_i - x_old_i)
+    then aggregates to a scalar via max over active components.
+    Signed: positive = locally convex -> increase rho
+            negative = locally concave -> decrease rho
 
-        # initialize storage
-        last = state.get('last_signal', None)
-        if last is None:
-                new_state = dict(state)
-                new_state['last_signal'] = float(signal)
-                return float(curv), new_state
+    Args:
+        state:    dict with keys 'm', 'v', 't'
+        grad_new: gradient at x_new (numpy array, shape (n,))
+        grad_old: gradient at x_old (numpy array, shape (n,))
+        x_new:    new iterate (numpy array, shape (n,))
+        x_old:    previous iterate (numpy array, shape (n,))
+        curv:     current scalar curvature (rho)
+        params:   AdamCurvParams
 
-        delta = float(signal) - float(last)
-        g_cur = float(delta * delta)
+    Returns:
+        (new_curv, new_state)
+    """
+    dx = np.asarray(x_new, dtype=float) - np.asarray(x_old, dtype=float)
+    dg = np.asarray(grad_new, dtype=float) - np.asarray(grad_old, dtype=float)
 
-        m = float(state.get('m', 0.0))
-        v = float(state.get('v', 0.0))
-        t = int(state.get('t', 0))
+    active = np.abs(dx) > 1e-12
+    if not np.any(active):
+        return float(curv), state   # no movement, skip update
 
-        t += 1
-        m = params.beta1 * m + (1.0 - params.beta1) * g_cur
-        v = params.beta2 * v + (1.0 - params.beta2) * (g_cur ** 2)
+    secant = np.where(active, dg / np.where(active, dx, 1.0), 0.0)
+    g_cur = float(np.max(secant[active]))   # signed scalar: worst-case component
 
-        # bias correction
-        m_hat = m / (1.0 - (params.beta1 ** t)) if t > 0 else m
-        v_hat = v / (1.0 - (params.beta2 ** t)) if t > 0 else v
+    t = state['t'] + 1
+    m = params.beta1 * state['m'] + (1.0 - params.beta1) * g_cur
+    v = params.beta2 * state['v'] + (1.0 - params.beta2) * (g_cur ** 2)
 
-        step = params.lr * m_hat / (_math.sqrt(v_hat) + params.eps)
+    m_hat = m / (1.0 - params.beta1 ** t)
+    v_hat = v / (1.0 - params.beta2 ** t)
 
-        new_curv = float(curv + step)
-        new_curv = max(params.min_curv, min(params.max_curv, new_curv))
+    step = params.lr * m_hat / (np.sqrt(v_hat) + params.eps)
+    new_curv = float(np.clip(curv + step, params.min_curv, params.max_curv))
 
-        new_state = {'m': m, 'v': v, 't': t, 'last_signal': float(signal)}
-        return new_curv, new_state
+    return new_curv, {'m': m, 'v': v, 't': t}
 
+def adam_secant_update_percoord(states: list, grad_new: np.ndarray, grad_old: np.ndarray,
+                                x_new: np.ndarray, x_old: np.ndarray,
+                                curv_vec: np.ndarray, params: AdamCurvParams):
+    """
+    Per-coordinate Adam-secant update. No aggregation — each coordinate updated independently.
+    Inactive coordinates (|dx_j| <= 1e-12) are skipped and keep their current rho_j.
+
+    Args:
+        states:   list of n dicts, one Adam state per coordinate
+        grad_new: gradient at x_new, shape (n,)
+        grad_old: gradient at x_old, shape (n,)
+        x_new:    new iterate, shape (n,)
+        x_old:    previous iterate, shape (n,)
+        curv_vec: current per-coordinate curvature, shape (n,)
+        params:   AdamCurvParams
+
+    Returns:
+        (new_curv_vec, new_states)
+    """
+    dx = np.asarray(x_new, dtype=float) - np.asarray(x_old, dtype=float)
+    dg = np.asarray(grad_new, dtype=float) - np.asarray(grad_old, dtype=float)
+    active = np.abs(dx) > 1e-12
+
+    new_curv = curv_vec.copy()
+    new_states = list(states)
+
+    for j in range(len(curv_vec)):
+        if not active[j]:
+            continue
+        s_j = float(dg[j] / dx[j])   # signed scalar secant for coordinate j
+        new_curv[j], new_states[j] = adam_curv_update(
+            states[j], s_j, float(curv_vec[j]), params
+        )
+
+    return new_curv, new_states

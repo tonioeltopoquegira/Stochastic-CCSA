@@ -2,7 +2,9 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
-from ccsa.params import MMA_RhoParams, MMA_SigmaParams, update_rho, AdamCurvParams, init_adam_curv_state, adam_curv_update, adam_curv_update_scalar
+from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, update_rho,
+                         AdamCurvParams, init_adam_curv_state,
+                         adam_curv_update, adam_secant_update)
 from ccsa.asymptote import AsymptoteUpdater
 from ccsa.dual import DualSubproblemBuilder
 from ccsa.feasibility_minimization import feasibility_solver
@@ -30,7 +32,7 @@ class CCSAOptimizer:
                  dg: Optional[Callable] = None,
                  x0: Optional[np.ndarray] = None,
                  conservative = True,
-                 update_rule: str = 'mulitplier',
+                 update_rule: str = 'multiplier',   # 'multiplier' | 'adam_violation' | 'adam_secant'
                  update_rule_kwargs: Optional[dict] = None):
         """
         params: initial flat parameter array (will be copied). If x0 provided, it overrides params.
@@ -53,6 +55,14 @@ class CCSAOptimizer:
             sigma_params = MMA_SigmaParams(expand=expand, contract=contract, sigma_min=sigma_min)
         self.sigma_params = sigma_params
 
+        if not self.conservative and self.max_inner > 1:
+            import warnings
+            warnings.warn(
+                "max_inner > 1 has no effect when conservative=False: "
+                "the inner loop always exits after one iteration.",
+                UserWarning, stacklevel=2
+            )
+
         # initialize x_k (current major iterate)
         # This can be changed directly to the first one I guess
         if x0 is not None:
@@ -61,6 +71,8 @@ class CCSAOptimizer:
             x0_arr = np.asarray(params, dtype=float).ravel()
         self.x_k = x0_arr.copy()
         n = self.x_k.size
+        self.grad_f_k = None   # stores gradient at x_k across outer steps, used by adam_secant
+        self.grad_g_k = None   # stores dg/dx rows at x_k across outer steps, for adam_secant
 
         # bounds handling: either None or (lb_array, ub_array)
         if bounds is not None:
@@ -115,10 +127,9 @@ class CCSAOptimizer:
         # adaptive curvature update settings
         self.update_rule = str(update_rule) if update_rule is not None else 'fixed'
         self.update_rule_kwargs = dict(update_rule_kwargs) if update_rule_kwargs is not None else {}
-        if self.update_rule == 'adam_curv':
-            # build params dataclass from kwargs
+        if self.update_rule in ('adam_violation', 'adam_secant'):
             kw = {'lr': 1e-2, 'beta1': 0.9, 'beta2': 0.999, 'eps': 1e-8,
-                  'min_curv': 1e-6, 'max_curv': 1e3}
+                'min_curv': 1e-6, 'max_curv': 1e3}
             kw.update(self.update_rule_kwargs)
             self._adam_curv_params = AdamCurvParams(**kw)
             self._curv_state = init_adam_curv_state()
@@ -172,6 +183,9 @@ class CCSAOptimizer:
         g_best = g_k.copy()
         wval_used = 0.0
         accept_type = "reject"
+        grad_f_best = grad_f_k.copy()
+        violation_f = 0.0
+        violation_gc = np.zeros(m, dtype=float)
 
         # Initialize metric fields if first run
         if "acceptance_stats" not in self.metrics:
@@ -228,6 +242,10 @@ class CCSAOptimizer:
 
             gcur = np.atleast_1d(self.g(x_candidate)).astype(float) if m > 0 else np.zeros(0, dtype=float)
 
+            # inside the inner loop
+            violation_f = float(f_cur - tilde_f)
+            violation_gc = (gcur - tilde_gc) if m > 0 else np.zeros(0, dtype=float)
+
             self.metrics["weighted_evals"] += 0.5
 
             # ---- Acceptance criteria ----
@@ -264,34 +282,30 @@ class CCSAOptimizer:
                     g_best = g_bar.copy() if m > 0 else np.zeros(0, dtype=float)
                     grad_f_k = grad_f_bar.copy()
                     wval_used = 0.0  # feasibility minimization doesn't use w_val in the same way
+                    grad_f_best = grad_f_bar.copy()  
                 else:
                     accept_type = "reject"
+                    
 
             if accept:
                 f_best = float(f_cur)
                 x_best = x_candidate.copy()
                 g_best = gcur.copy() if m > 0 else np.zeros(0, dtype=float)
-                grad_f_k = grad_f_cur.copy()
+                grad_f_cur_accepted = grad_f_cur.copy()  # used by adam_secant at bottom
                 wval_used = w_val
                 break
             else:
-                # ---- Update rho for objective ----
-                if f_cur > tilde_f:
-                    # legacy/update_rho behavior (default)
-                    if self.update_rule == 'multiplier':
-                        rho = update_rho(rho, f_cur - tilde_f, w_val, self.rho_params)
-                    # if using adam_curv, skip inner-loop rho updates and let Adam adapt after outer step
-
-                # ---- Update rho_c for constraints ----
-                if m > 0:
-                    mask = gcur > tilde_gc
-                    gap_c = gcur - tilde_gc
-                    if self.update_rule == 'multiplier':
-                        # legacy per-constraint update
-                        self.rho_c[mask] = update_rho(self.rho_c[mask], gap_c[mask], w_val, self.rho_params)
-                    # if using adam_curv, skip inner-loop rho_c updates and let Adam adapt after outer step
-
+                if self.update_rule == 'multiplier':
+                    if violation_f > 0.0:
+                        rho = update_rho(rho, violation_f, w_val, self.rho_params)
+                    if m > 0:
+                        mask = violation_gc > 0.0
+                        if np.any(mask):
+                            self.rho_c[mask] = update_rho(
+                                self.rho_c[mask], violation_gc[mask], w_val, self.rho_params
+                            )
                 wval_used = w_val
+
 
         # ---- Outer updates (asymptotes) ----
         L_new, U_new = self.asym.update(x_km1=x_k, x_kp1=x_best, L=self.L.copy(), U=self.U.copy())
@@ -308,29 +322,61 @@ class CCSAOptimizer:
         self.U = U_new
         self.rho = float(rho)
 
-        # Apply adaptive curvature update (if enabled) using gradient at new iterate
-        if self.update_rule == 'adam_curv' and self._curv_state is not None:
+        # objective curvature adaptive update
+        if self.update_rule in ('adam_violation', 'adam_secant') and self._curv_state is not None:
             try:
-                new_rho, self._curv_state = adam_curv_update(self._curv_state, grad_f_k, self.rho, self._adam_curv_params)
+                if self.update_rule == 'adam_violation':
+                    new_rho, self._curv_state = adam_curv_update(
+                        self._curv_state, violation_f, self.rho, self._adam_curv_params
+                    )
+                else:  # adam_secant
+                    if self.grad_f_k is not None:
+                        new_rho, self._curv_state = adam_secant_update(
+                            self._curv_state,
+                            grad_new=grad_f_cur,      # gradient at accepted x_best
+                            grad_old=self.grad_f_k,   # gradient at x_k (previous outer iterate)
+                            x_new=x_best,
+                            x_old=x_k,
+                            curv=self.rho,
+                            params=self._adam_curv_params
+                        )
+                    else:
+                        new_rho = self.rho   # first step, no previous gradient yet
                 self.rho = float(new_rho)
             except Exception:
-                # do not interrupt optimizer on updater failure
                 pass
 
-        # per-constraint adaptive updates (use scalar signal = constraint violation at x_best)
-        if self.update_rule == 'adam_curv' and m > 0 and getattr(self, '_curv_state_c', None) is not None:
+        # per-constraint curvature adaptive update
+        if self.update_rule in ('adam_violation', 'adam_secant') and m > 0 and getattr(self, '_curv_state_c', None) is not None:
             try:
-                # ensure length match
                 if len(self._curv_state_c) != self.rho_c.size:
-                    # re-init if sizes mismatch
                     self._curv_state_c = [init_adam_curv_state() for _ in range(self.rho_c.size)]
-                # use g_best (constraint values at x_best) as signal
                 for i in range(self.rho_c.size):
-                    signal = float(g_best[i]) if i < g_best.size else 0.0
-                    new_rc, self._curv_state_c[i] = adam_curv_update_scalar(self._curv_state_c[i], signal, float(self.rho_c[i]), self._adam_curv_params)
+                    if self.update_rule == 'adam_violation':
+                        signal = float(violation_gc[i]) if i < violation_gc.size else 0.0
+                        new_rc, self._curv_state_c[i] = adam_curv_update(
+                            self._curv_state_c[i], signal, float(self.rho_c[i]), self._adam_curv_params
+                        )
+                    else:  # adam_secant — use per-constraint gradient rows
+                        if self.grad_g_k is not None and self.dg is not None:
+                            new_rc, self._curv_state_c[i] = adam_secant_update(
+                                self._curv_state_c[i],
+                                grad_new=grad_g_k[i],         # current dg/dx row i
+                                grad_old=self.grad_g_k[i],    # previous outer step row i
+                                x_new=x_best,
+                                x_old=x_k,
+                                curv=float(self.rho_c[i]),
+                                params=self._adam_curv_params
+                            )
+                        else:
+                            new_rc = self.rho_c[i]
                     self.rho_c[i] = float(new_rc)
             except Exception:
                 pass
+        
+        self.grad_f_k = grad_f_cur.copy() if accept_type != 'reject' else self.grad_f_k
+        if m > 0 and accept_type != 'reject':
+            self.grad_g_k = grad_g_k.copy()
 
         # ---- Record histories and metrics ----
         self.metrics["cumulative_wval"] += float(wval_used)
