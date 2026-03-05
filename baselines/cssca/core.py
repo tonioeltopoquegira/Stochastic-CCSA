@@ -237,24 +237,24 @@ class CSSCAOptimizer:
         f_true_bar = self._call_fun(x_bar)
         g_true_bar = self._call_g(x_bar)
 
-        print("---- x_bar diagnostics ----")
-        print("||x_bar - x_k||:", np.linalg.norm(x_bar - self.x_k))
-        print("x_bar norm:", np.linalg.norm(x_bar))
-        print("max |x_bar|:", np.max(np.abs(x_bar)))
+        #print("---- x_bar diagnostics ----")
+        #print("||x_bar - x_k||:", np.linalg.norm(x_bar - self.x_k))
+        #print("x_bar norm:", np.linalg.norm(x_bar))
+        #print("max |x_bar|:", np.max(np.abs(x_bar)))
 
-        print("SURROGATE: fbar =", fbar_xbar,
-            "max gbar =", np.max(gbar_xbar))
+        #print("SURROGATE: fbar =", fbar_xbar,
+        #    "max gbar =", np.max(gbar_xbar))
 
-        print("TRUE:      f =", f_true_bar,
-            "max g =", np.max(g_true_bar))
-        print("----------------------------")
+        #print("TRUE:      f =", f_true_bar,
+        #    "max g =", np.max(g_true_bar))
+        #print("----------------------------")
 
 
         # if infeasible, solve feasibility subproblem:
         if not feasible:
 
             self.count_infeas += 1
-            print(self.count_infeas * 100.0 / self.count, "Percentage of")
+            #print(self.count_infeas * 100.0 / self.count, "Percentage of")
 
             # minimize alpha s.t. fbar_i(x) <= alpha for i=1..m
             def feasibility_solver():
@@ -323,7 +323,7 @@ class CSSCAOptimizer:
                 return x_sol, success
 
             x_bar, feasible_flag = feasibility_solver()
-            print("Feasibility solver success:", feasible_flag)
+            #print("Feasibility solver success:", feasible_flag)
 
         # 3) step update xt+1 = (1 - gamma_t) xt + gamma_t * x_bar
         gamma_t = self._gamma_t()

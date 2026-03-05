@@ -2,7 +2,7 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
-from ccsa.params import MMA_RhoParams, MMA_SigmaParams, update_rho
+from ccsa.params import MMA_RhoParams, MMA_SigmaParams, update_rho, AdamCurvParams, init_adam_curv_state, adam_curv_update, adam_curv_update_scalar
 from ccsa.asymptote import AsymptoteUpdater
 from ccsa.dual import DualSubproblemBuilder
 from ccsa.feasibility_minimization import feasibility_solver
@@ -10,7 +10,7 @@ from ccsa.feasibility_minimization import feasibility_solver
 # -------------------------
 # Modular MMA optimizer (flat parameter vector)
 # -------------------------
-class CCSAOptimizer:
+class CCSAOptimizer: 
     MMA_RHOMIN = 1e-5
 
     def __init__(self,
@@ -29,7 +29,9 @@ class CCSAOptimizer:
                  df: Optional[Callable] = None,
                  dg: Optional[Callable] = None,
                  x0: Optional[np.ndarray] = None,
-                 conservative = True):
+                 conservative = True,
+                 update_rule: str = 'mulitplier',
+                 update_rule_kwargs: Optional[dict] = None):
         """
         params: initial flat parameter array (will be copied). If x0 provided, it overrides params.
         fun: callable (x, grad=True) -> (f, df) if grad requested, otherwise fun(x) -> float
@@ -110,6 +112,20 @@ class CCSAOptimizer:
         }
         self.acceptance_trace = []
 
+        # adaptive curvature update settings
+        self.update_rule = str(update_rule) if update_rule is not None else 'fixed'
+        self.update_rule_kwargs = dict(update_rule_kwargs) if update_rule_kwargs is not None else {}
+        if self.update_rule == 'adam_curv':
+            # build params dataclass from kwargs
+            kw = {'lr': 1e-2, 'beta1': 0.9, 'beta2': 0.999, 'eps': 1e-8,
+                  'min_curv': 1e-6, 'max_curv': 1e3}
+            kw.update(self.update_rule_kwargs)
+            self._adam_curv_params = AdamCurvParams(**kw)
+            self._curv_state = init_adam_curv_state()
+        else:
+            self._adam_curv_params = None
+            self._curv_state = None
+
 
 
 
@@ -138,12 +154,18 @@ class CCSAOptimizer:
                 grad_g_k = np.zeros((m, x_k.size), dtype=float)
             if self.rho_c is None:
                 self.rho_c = np.full(m, rho)
+            # initialize per-constraint Adam state if using adaptive updates
+            if self.update_rule == 'adam_curv' and getattr(self, '_curv_state_c', None) is None:
+                # create list of per-constraint states
+                self._curv_state_c = [init_adam_curv_state() for _ in range(m)]
         else:
             g_k = np.zeros(0, dtype=float)
             grad_g_k = np.zeros((0, x_k.size), dtype=float)
             m = 0
             if self.rho_c is None:
                 self.rho_c = np.zeros(0, dtype=float)
+            if self.update_rule == 'adam_curv' and getattr(self, '_curv_state_c', None) is None:
+                self._curv_state_c = []
 
         f_best = float(f_k)
         x_best = x_k.copy()
@@ -221,7 +243,6 @@ class CCSAOptimizer:
                 accept = True
                 accept_type = "infeasible_accept"
             else:
-                # Insert here
                 if not self.conservative:
                     # run feasibility minimization using current curvature
                     x_bar, success = feasibility_solver(self.L, self.U, x_k, g_k, grad_g_k, (self.lb, self.ub))
@@ -256,13 +277,19 @@ class CCSAOptimizer:
             else:
                 # ---- Update rho for objective ----
                 if f_cur > tilde_f:
-                    rho = update_rho(rho, f_cur - tilde_f, w_val, self.rho_params)
+                    # legacy/update_rho behavior (default)
+                    if self.update_rule == 'multiplier':
+                        rho = update_rho(rho, f_cur - tilde_f, w_val, self.rho_params)
+                    # if using adam_curv, skip inner-loop rho updates and let Adam adapt after outer step
 
                 # ---- Update rho_c for constraints ----
                 if m > 0:
                     mask = gcur > tilde_gc
                     gap_c = gcur - tilde_gc
-                    self.rho_c[mask] = update_rho(self.rho_c[mask], gap_c[mask], w_val, self.rho_params)
+                    if self.update_rule == 'multiplier':
+                        # legacy per-constraint update
+                        self.rho_c[mask] = update_rho(self.rho_c[mask], gap_c[mask], w_val, self.rho_params)
+                    # if using adam_curv, skip inner-loop rho_c updates and let Adam adapt after outer step
 
                 wval_used = w_val
 
@@ -280,6 +307,30 @@ class CCSAOptimizer:
         self.L = L_new
         self.U = U_new
         self.rho = float(rho)
+
+        # Apply adaptive curvature update (if enabled) using gradient at new iterate
+        if self.update_rule == 'adam_curv' and self._curv_state is not None:
+            try:
+                new_rho, self._curv_state = adam_curv_update(self._curv_state, grad_f_k, self.rho, self._adam_curv_params)
+                self.rho = float(new_rho)
+            except Exception:
+                # do not interrupt optimizer on updater failure
+                pass
+
+        # per-constraint adaptive updates (use scalar signal = constraint violation at x_best)
+        if self.update_rule == 'adam_curv' and m > 0 and getattr(self, '_curv_state_c', None) is not None:
+            try:
+                # ensure length match
+                if len(self._curv_state_c) != self.rho_c.size:
+                    # re-init if sizes mismatch
+                    self._curv_state_c = [init_adam_curv_state() for _ in range(self.rho_c.size)]
+                # use g_best (constraint values at x_best) as signal
+                for i in range(self.rho_c.size):
+                    signal = float(g_best[i]) if i < g_best.size else 0.0
+                    new_rc, self._curv_state_c[i] = adam_curv_update_scalar(self._curv_state_c[i], signal, float(self.rho_c[i]), self._adam_curv_params)
+                    self.rho_c[i] = float(new_rc)
+            except Exception:
+                pass
 
         # ---- Record histories and metrics ----
         self.metrics["cumulative_wval"] += float(wval_used)
