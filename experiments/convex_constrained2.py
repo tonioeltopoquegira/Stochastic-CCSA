@@ -487,21 +487,13 @@ def stoch_expquad_diag_exp(
     for cr in ccsa_results:
         col = cr.get('color', 'tab:orange')
         label0 = f"{ccsa_names[0]} σ={cr['sigma_min']}" if len(ccsa_names) > 0 else f"custom non-cons σ={cr['sigma_min']}"
-        if ccsa_plot_expected:
-            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color='gray', label=label0)
-        else:
-            ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
+        ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
                      marker='o', markersize=4, color=col, label=label0)
     for cr in ccsa_quad_results:
         col = cr.get('color', 'tab:green')
         label1 = f"{ccsa_names[1]} σ={cr['sigma_min']}" if len(ccsa_names) > 1 else f"custom cons σ={cr['sigma_min']}"
-        if ccsa_plot_expected:
-            ax1.plot(cr['cum_we_hist'], cr['f_expected_at_xhist'], linestyle='-', linewidth=2.25,
-                     color=col, label=label1)
-        else:
-            ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
-                     marker='s', markersize=4, color=col, label=label1)
+        ax1.plot(cr['cum_we_hist'], cr['f_stoch_at_xhist'], linestyle='-', linewidth=1.5,
+                    marker='s', markersize=4, color='gray', label=label1)
 
     try:
         if 'cssca_runs' in locals() and len(cssca_runs) > 0:
