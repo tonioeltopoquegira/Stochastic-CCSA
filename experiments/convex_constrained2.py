@@ -272,7 +272,7 @@ def stoch_expquad_diag_exp(
 
             metrics = None
             all_x = []
-            for out in range(min(mma_maxeval, 1000)):
+            for out in range(min(mma_maxeval, 5000)):
                 f_b, g_b, metrics = optimizer.step()
                 all_x.append(metrics["x_history"][-1])
 
@@ -346,7 +346,7 @@ def stoch_expquad_diag_exp(
 
             cssca_f_hist = []
             cssca_cons_hist = []
-            for t in range(1000):
+            for t in range(5000):
                 x_cssca, f_cssca, cons_cssca = cssca_opt.step()
                 cssca_f_hist.append(f_cssca)
                 cssca_cons_hist.append(cons_cssca.copy() if hasattr(cons_cssca, 'copy') else np.atleast_1d(cons_cssca))

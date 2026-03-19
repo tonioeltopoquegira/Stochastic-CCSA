@@ -249,7 +249,7 @@ def rotated_exp_stoch_constrained_exp(
 
         f_hist, g_hist = [], []
 
-        for _ in range(1000):
+        for _ in range(5000):
             x_cssca, f_cssca, cons_cssca = cssca_opt.step()
             f_hist.append(f_cssca)
             g_hist.append(cons_cssca[0] if hasattr(cons_cssca, '__len__') else cons_cssca)
