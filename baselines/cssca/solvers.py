@@ -56,10 +56,10 @@ def solve_convex_subproblem_quad(surrogates, x0: np.ndarray,
                    constraints=cons,
                    options={'maxiter': maxiter, 'ftol': 1e-9})
     
-    print("SLSQP success:", res.success)
-    print("SLSQP message:", res.message)
-    print("SLSQP iterations:", res.nit)
-    print("SLSQP objective value:", res.fun)
+    #print("SLSQP success:", res.success)
+    #print("SLSQP message:", res.message)
+    #print("SLSQP iterations:", res.nit)
+    #print("SLSQP objective value:", res.fun)
 
 
     x_opt = res.x
