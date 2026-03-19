@@ -135,6 +135,9 @@ def rotated_exp_stoch_constrained_exp(
     optimizer.params = x0.copy(),
 
     for sigma_min, color in zip(sigma_mins, colors_ccsa):
+        # Reset optimizer state before each sigma_min run to prevent state carryover
+        optimizer.reset(x0=x0.copy())
+        
         metrics = None
         all_x = []
 
@@ -179,6 +182,9 @@ def rotated_exp_stoch_constrained_exp(
     optimizer_quad.params = x0.copy(),
 
     for sigma_min, color in zip(sigma_mins, colors_ccsa_quad):
+        # Reset optimizer state before each sigma_min run to prevent state carryover
+        optimizer_quad.reset(x0=x0.copy())
+        
         metrics = None
         all_x = []
 

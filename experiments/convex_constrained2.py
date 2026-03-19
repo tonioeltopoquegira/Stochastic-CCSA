@@ -263,10 +263,8 @@ def stoch_expquad_diag_exp(
         optimizer.params = x0.copy(),
 
         for sigma_min, color in zip(sigma_mins, colors_ccsa):
-            try:
-                optimizer.reset()
-            except Exception:
-                pass
+            # Reset optimizer state before each sigma_min run to prevent state carryover
+            optimizer.reset(x0=x0.copy())
             try:
                 optimizer.sigma_params.sigma_min = sigma_min
             except Exception:
@@ -370,10 +368,8 @@ def stoch_expquad_diag_exp(
         optimizer_quad.x0 = x0.copy()
         optimizer_quad.params = x0.copy(),
         for sigma_min, color in zip(sigma_mins, colors_ccsa):
-            try:
-                optimizer_quad.reset()
-            except Exception:
-                pass
+            # Reset optimizer state before each sigma_min run to prevent state carryover
+            optimizer_quad.reset(x0=x0.copy())
 
             metrics = None
             all_x = []
