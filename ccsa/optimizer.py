@@ -33,7 +33,8 @@ class CCSAOptimizer:
                  x0: Optional[np.ndarray] = None,
                  conservative = True,
                  update_rule: str = 'multiplier',   # 'multiplier' | 'adam_violation' | 'adam_secant'
-                 update_rule_kwargs: Optional[dict] = None):
+                 update_rule_kwargs: Optional[dict] = None,
+                 per_coord_rho: bool = False):      # Per-coordinate curvature for quadratic surrogates
         """
         params: initial flat parameter array (will be copied). If x0 provided, it overrides params.
         fun: callable (x, grad=True) -> (f, df) if grad requested, otherwise fun(x) -> float
@@ -46,8 +47,18 @@ class CCSAOptimizer:
         self.df = df
         self.dg = dg
         self.max_inner = int(max_inner)
-        self.rho = float(rho_init)      # scalar rho (objective curvature)
+        self.per_coord_rho = bool(per_coord_rho)  # Per-coordinate curvature flag (quadratic mode only)
         self.conservative = conservative
+        
+        # Validate: per_coord_rho only works with quadratic surrogates and multiplier/adam_secant
+        if self.per_coord_rho:
+            if not use_quadratic_surrogates:
+                raise ValueError("per_coord_rho requires use_quadratic_surrogates=True")
+            if update_rule == 'adam_violation':
+                raise ValueError("per_coord_rho incompatible with adam_violation (violation is global). Use multiplier or adam_secant.")
+        
+        # Initialize rho placeholder
+        self.rho = float(rho_init)
 
         self.rho_params = rho_params if rho_params is not None else MMA_RhoParams()
         # if no sigma_params provided, create from legacy small set
@@ -73,6 +84,10 @@ class CCSAOptimizer:
         n = self.x_k.size
         self.grad_f_k = None   # stores gradient at x_k across outer steps, used by adam_secant
         self.grad_g_k = None   # stores dg/dx rows at x_k across outer steps, for adam_secant
+        
+        # NOW convert rho to per-coordinate vector if needed (now we know n)
+        if self.per_coord_rho:
+            self.rho = np.full(n, float(rho_init), dtype=float)  # (n,) vector
 
         # bounds handling: either None or (lb_array, ub_array)
         if bounds is not None:
@@ -122,6 +137,7 @@ class CCSAOptimizer:
             },
             "rho_history": [],
             "rho_c_history": [],
+            "rho_vec_history": [],                  # Per-coordinate rho history (when per_coord_rho=True)
             "objective_violation_history": [],     # Track OBJECTIVE violations only
             "constraint_violation_history": [],    # Track CONSTRAINT violations only
             "violation_history": []                 # Legacy: combined
@@ -144,11 +160,19 @@ class CCSAOptimizer:
             kw.update(self.update_rule_kwargs)
             self._adam_curv_params = AdamCurvParams(**kw)
             # SEPARATE Adam states: one for rho (objective), one list for rho_c (constraints)
-            self._curv_state_obj = init_adam_curv_state()      # For rho (objective violations)
+            if self.per_coord_rho:
+                # Per-coordinate: list of Adam states, one per coordinate
+                self._curv_state_obj_list = [init_adam_curv_state() for _ in range(n)]
+            else:
+                # Scalar: single Adam state for rho
+                self._curv_state_obj = init_adam_curv_state()      # For rho (objective violations)
             self._curv_state_c_list = []                        # For rho_c (constraint violations)
         else:
             self._adam_curv_params = None
-            self._curv_state_obj = None
+            if self.per_coord_rho:
+                self._curv_state_obj_list = []
+            else:
+                self._curv_state_obj = None
             self._curv_state_c_list = []
 
     def reset(self, x0: Optional[np.ndarray] = None):
@@ -388,6 +412,8 @@ class CCSAOptimizer:
             else:
                 if self.update_rule == 'multiplier':
                     if violation_f > 0.0:
+                        # When per_coord_rho: rho is (n,), w_val is (n,), use element-wise
+                        # When not: rho is scalar, w_val is scalar, use scalar
                         rho = update_rho(rho, violation_f, w_val, self.rho_params)
                         self.metrics["curvature_updates"]["multiplier_on_rejection"] += 1
                         self.metrics["curvature_updates"]["total_updates"] += 1
@@ -398,8 +424,11 @@ class CCSAOptimizer:
                             violation_gc_1d = np.atleast_1d(np.asarray(violation_gc).ravel())
                             mask = violation_gc_1d > 0.0
                             if np.any(mask):
+                                # For constraints: rho_c is per-constraint (m,), w_val is per-coordinate (n,)
+                                # Use mean of w_val for constraint updates
+                                w_val_for_c = np.mean(w_val) if isinstance(w_val, np.ndarray) else w_val
                                 self.rho_c[mask] = update_rho(
-                                    self.rho_c[mask], violation_gc_1d[mask], w_val, self.rho_params
+                                    self.rho_c[mask], violation_gc_1d[mask], w_val_for_c, self.rho_params
                                 )
                 wval_used = w_val
                 

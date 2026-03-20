@@ -59,14 +59,15 @@ class DualSubproblemBuilder:
         # flag: use quadratic CCSA-style surrogates instead of MMA moving-asymptotes
         self.quadratic = bool(quadratic)
 
-    def reconstruct_xcandidate_from_y(self, y: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray, float, float]:
+    def reconstruct_xcandidate_from_y(self, y: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray, float, float, np.ndarray]:
         """
         Given y (m,), reconstruct x_candidate and compute:
         - tilde_f (approximated objective at x_candidate)
         - tilde_gc (approximated constraints vector at x_candidate)
-        - w_val (weight used for rho updates)
+        - w_val (weight used for rho updates) - SCALAR for scalar rho
         - val_extra (per-variable contribution to dual objective)
-        Return: x_candidate, tilde_f, tilde_gc, w_val, val_extra
+        - w_val_vec (per-coordinate weights for per-coordinate rho) - (n,) for per-coord mode
+        Return: x_candidate, tilde_f, tilde_gc, w_val, val_extra, w_val_vec
         """
         y = np.asarray(y, dtype=float).ravel() if self.m > 0 else np.zeros(0, dtype=float)
         x_candidate = np.empty(self.n, dtype=float)
@@ -75,7 +76,8 @@ class DualSubproblemBuilder:
             tilde_gc = np.where(np.isnan(self.g_k), 0.0, self.g_k).astype(float).copy()
         else:
             tilde_gc = np.zeros(0, dtype=float)
-        w_val = 0.0
+        w_val = np.zeros(self.n, dtype=float)  # Per-coordinate weights for accumulation
+        w_val_vec = np.zeros(self.n, dtype=float)  # Per-coordinate weights
         val_extra = 0.0
 
         grad_g = self.grad_g_k if self.m > 0 else np.zeros((0, self.n), dtype=float)
@@ -186,13 +188,16 @@ class DualSubproblemBuilder:
                 if self.m > 0 and mask.any():
                     tilde_gc[mask] += grad_g[mask, j] * dxj + self.rho_c[mask] * dx2sig
 
-                w_val     += dx2sig
+                w_val[j]  = dx2sig
                 val_extra += v * dxj + 0.5 * u * dx2 / max(1e-30, sigma2)
 
-        w_floor = max(1e-12, np.mean(self.sigma)**2 * 1e-14)
-        w_val = float(max(w_val, w_floor))
+        w_floor = np.maximum(1e-12, np.mean(self.sigma)**2 * 1e-14)
+        w_val = np.maximum(w_val, w_floor)
+        
+        # Aggregate w_val to scalar for rho updates (use mean across coordinates)
+        w_val_scalar = float(np.mean(w_val))
 
-        return x_candidate, tilde_f, tilde_gc, w_val, val_extra
+        return x_candidate, tilde_f, tilde_gc, w_val_scalar, val_extra
 
 
     def build_dual_objective(self):
