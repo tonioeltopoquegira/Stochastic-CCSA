@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
+import time
 
 from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, update_rho,
                          AdamCurvParams, init_adam_curv_state,
@@ -338,22 +339,23 @@ class CCSAOptimizer:
                 obj_only, obj_with_grad = builder.build_dual_objective()
                 y0 = np.zeros(m, dtype=float)
                 dual_bounds = [(0.0, np.inf) for _ in range(m)]
+                
                 res = minimize(lambda yy: obj_with_grad(yy),
                             y0,
                             method='L-BFGS-B',
                             jac=True,
                             bounds=dual_bounds,
-                            options={'maxiter': 10, 'ftol': 1e-30})
+                            options={'maxiter': 10, 'ftol': 1e-4})
+               
                 y_opt = res.x
 
+            #print("before reconstructing x_candidate from y_opt")
+            t = time.time()
             x_candidate, tilde_f, tilde_gc, w_val, val_extra = builder.reconstruct_xcandidate_from_y(y_opt)
+            #print(f"after reconstructing x_candidate from y_opt: {time.time() - t:.4f} seconds")
 
-            # Evaluate true f and g
-            if self.df is None:
-                f_cur, grad_f_cur = self.fun(x_candidate, grad=True)
-            else:
-                f_cur = float(self.fun(x_candidate))
-                grad_f_cur = np.asarray(self.df(x_candidate), dtype=float).ravel()
+            # Evaluate true f and g (no gradient needed)
+            f_cur = float(self.fun(x_candidate))
 
             gcur = np.atleast_1d(self.g(x_candidate)).astype(float) if m > 0 else np.zeros(0, dtype=float)
 
@@ -377,27 +379,28 @@ class CCSAOptimizer:
                 accept_type = "infeasible_accept"
             else:
                 if not self.conservative:
-                    # run feasibility minimization using current curvature
-                    x_bar, success = feasibility_solver(self.L, self.U, x_k, g_k, grad_g_k, (self.lb, self.ub))
-                    
-                    # evaluate true f and g at x_bar
-                    if self.df is None:
-                        f_bar, grad_f_bar = self.fun(x_bar, grad=True)
+                    if m > 0:
+                        # run feasibility minimization using current curvature (only if there are constraints)
+                        x_bar, success = feasibility_solver(self.L, self.U, x_k, g_k, grad_g_k, (self.lb, self.ub))
                     else:
-                        f_bar = float(self.fun(x_bar))
-                        grad_f_bar = np.asarray(self.df(x_bar), dtype=float).ravel()
+                        # no constraints: use candidate point directly
+                        x_bar = x_candidate.copy()
                     
+                    # evaluate function and constraints at x_bar (NO gradient)
+                    f_bar = float(self.fun(x_bar))
                     g_bar = np.atleast_1d(self.g(x_bar)).astype(float) if m > 0 else np.zeros(0, dtype=float)
                     
                     # accept the feasibility-minimized point
                     accept = True
-                    accept_type = 'feasibility_min'
+                    if m > 0:
+                        accept_type = 'feasibility_min'
+                    else: 
+                        accept_type = 'feasible_accept'
+
                     f_best = float(f_bar)
                     x_best = x_bar.copy()
                     g_best = g_bar.copy() if m > 0 else np.zeros(0, dtype=float)
-                    grad_f_k = grad_f_bar.copy()
-                    wval_used = 0.0  # feasibility minimization doesn't use w_val in the same way
-                    grad_f_best = grad_f_bar.copy()  
+                    wval_used = 0.0  # feasibility minimization doesn't use w_val in the same way  
                 else:
                     accept_type = "reject"
                     
@@ -406,7 +409,6 @@ class CCSAOptimizer:
                 f_best = float(f_cur)
                 x_best = x_candidate.copy()
                 g_best = gcur.copy() if m > 0 else np.zeros(0, dtype=float)
-                grad_f_cur_accepted = grad_f_cur.copy()  # used by adam_secant at bottom
                 wval_used = w_val
                 break
             else:
@@ -435,7 +437,10 @@ class CCSAOptimizer:
 
 
         # Update of asymptotes (NOT used in quadratic surrogate mode)
+        #if not self.use_quadratic_surrogates:
         L_new, U_new = self.asym.update(x_km1=x_k, x_kp1=x_best, L=self.L.copy(), U=self.U.copy())
+        #else:
+        #    L_new, U_new = self.L.copy(), self.U.copy()
 
         # decay not applied for adam_violation/adam_secant)
         if self.update_rule == 'multiplier':
@@ -471,13 +476,13 @@ class CCSAOptimizer:
                 self.metrics["objective_violation_history"].append(float(violation_f))
             else:  # adam_secant
                 # Signal: gradient-based curvature estimate for objective
-                if self.grad_f_k is not None:
+                if self._grad_f_k_prev is not None:
                     new_rho, self._curv_state_obj = adam_secant_update(
                         self._curv_state_obj,
-                        grad_new=grad_f_cur,      # gradient at accepted x_best
-                        grad_old=self.grad_f_k,   # gradient at x_k (previous outer iterate)
-                        x_new=x_best,
-                        x_old=x_k,
+                        grad_new=grad_f_k,      # gradient at current x_k
+                        grad_old=self._grad_f_k_prev,   # gradient from previous iteration
+                        x_new=x_k,
+                        x_old=self._x_k_prev,
                         curv=self.rho,
                         params=self._adam_curv_params
                     )
@@ -485,6 +490,7 @@ class CCSAOptimizer:
                     self.metrics["curvature_updates"]["total_updates"] += 1
                 else:
                     new_rho = self.rho   # first step, no previous gradient yet
+
             self.rho = float(new_rho)
 
         # ===== CONSTRAINT CURVATURE ADAPTIVE UPDATE =====
@@ -527,7 +533,6 @@ class CCSAOptimizer:
             except Exception:
                 pass
         
-        self.grad_f_k = grad_f_cur.copy() if accept_type != 'reject' else self.grad_f_k
         if m > 0 and accept_type != 'reject':
             self.grad_g_k = grad_g_k.copy()
 
