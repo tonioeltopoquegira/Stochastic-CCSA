@@ -35,7 +35,8 @@ class CCSAOptimizer:
                  conservative = True,
                  update_rule: str = 'multiplier',   # 'multiplier' | 'adam_violation' | 'adam_secant'
                  update_rule_kwargs: Optional[dict] = None,
-                 per_coord_rho: bool = False):      # Per-coordinate curvature for quadratic surrogates
+                 per_coord_rho: bool = False,
+                 store_history: bool = True):      # Per-coordinate curvature for quadratic surrogates
         """
         params: initial flat parameter array (will be copied). If x0 provided, it overrides params.
         fun: callable (x, grad=True) -> (f, df) if grad requested, otherwise fun(x) -> float
@@ -50,6 +51,7 @@ class CCSAOptimizer:
         self.max_inner = int(max_inner)
         self.per_coord_rho = bool(per_coord_rho)  # Per-coordinate curvature flag (quadratic mode only)
         self.conservative = conservative
+        self.store_history = bool(store_history)
         
         # Validate: per_coord_rho only works with quadratic surrogates and multiplier/adam_secant
         if self.per_coord_rho:
@@ -438,7 +440,10 @@ class CCSAOptimizer:
 
         # Update of asymptotes (NOT used in quadratic surrogate mode)
         #if not self.use_quadratic_surrogates:
+        #print("before asymptote update")
+        t = time.time()
         L_new, U_new = self.asym.update(x_km1=x_k, x_kp1=x_best, L=self.L.copy(), U=self.U.copy())
+        #print(f"after asymptote update: {time.time() - t:.4f} seconds")
         #else:
         #    L_new, U_new = self.L.copy(), self.U.copy()
 
@@ -540,34 +545,41 @@ class CCSAOptimizer:
         self.metrics["cumulative_wval"] += float(wval_used)
         self.metrics["acceptance_stats"][accept_type] += 1
         self.metrics["weighted_evals"] += 1.0
-
-        # keep both metrics and history in sync for robust plotting/analysis
-        self.metrics["x_history"].append(x_best.copy())
-        self.metrics["sigma_history"].append(self.asym.sigma.copy())
-        self.metrics["rho_history"].append(self.rho)
-        self.metrics["rho_c_history"].append(self.rho_c.copy() if self.rho_c is not None else np.zeros(0))
-        # cumulative weighted evals history - keep float for precise diffs
-        self.metrics["cumulative_weighted_evals_history"].append(float(self.metrics["weighted_evals"]))
-
-        # also maintain the 'history' dict so summary functions can rely on a single source
-        if "x" in self.history:
-            self.history["x"].append(x_best.copy())
-        else:
-            self.history["x"] = [x_best.copy()]
-        self.history.setdefault("sigma", []).append(self.asym.sigma.copy())
-        self.history.setdefault("rho", []).append(self.rho)
-        self.history.setdefault("rho_c", []).append(self.rho_c.copy() if self.rho_c is not None else np.zeros(0))
-        self.history.setdefault("weighted_evals", []).append(float(self.metrics["weighted_evals"]))
-
-        # record acceptance trace per outer iteration (create if needed)
+ 
+        # Scalar metrics
+        if self.store_history:
+            self.metrics["rho_history"].append(float(self.rho))
+            self.metrics["cumulative_weighted_evals_history"].append(float(self.metrics["weighted_evals"]))
+    
+        # Vector metrics
+        if self.store_history:
+            self.metrics["x_history"].append(x_best.copy())
+            self.metrics["sigma_history"].append(self.asym.sigma.copy())
+            self.metrics["rho_c_history"].append(
+                self.rho_c.copy() if self.rho_c is not None else np.zeros(0)
+            )
+ 
+        # history dict
+        if self.store_history:
+            self.history.setdefault("x", []).append(x_best.copy())
+            self.history.setdefault("sigma", []).append(self.asym.sigma.copy())
+            self.history.setdefault("rho_c", []).append(
+                self.rho_c.copy() if self.rho_c is not None else np.zeros(0)
+            )
+        
+        if self.store_history:
+            self.history.setdefault("rho", []).append(float(self.rho))
+            self.history.setdefault("weighted_evals", []).append(float(self.metrics["weighted_evals"]))
+    
         if not hasattr(self, "acceptance_trace"):
             self.acceptance_trace = []
-        self.acceptance_trace.append(accept_type)
-        
-        # Track violations (use maximum constraint violation or 0 if feasible)
+        if self.store_history:
+            self.acceptance_trace.append(accept_type)
+ 
         constraint_violation = float(np.max(g_best)) if g_best.size > 0 else 0.0
-        self.metrics["violation_history"].append(constraint_violation)
-
+        if self.store_history:
+            self.metrics["violation_history"].append(constraint_violation)
+ 
         return f_best, g_best, dict(self.metrics)
 
 
