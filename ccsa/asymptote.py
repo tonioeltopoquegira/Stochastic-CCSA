@@ -11,44 +11,35 @@ class AsymptoteUpdater:
                  sigma_params: Optional[MMA_SigmaParams] = None,
                  lower_bound: Optional[float] = None,
                  upper_bound: Optional[float] = None):
-        # prefer passed sigma_params or defaults
         self.sigma_params = sigma_params if sigma_params is not None else MMA_SigmaParams()
-        self.expand = float(self.sigma_params.expand)
+        self.expand   = float(self.sigma_params.expand)
         self.contract = float(self.sigma_params.contract)
         self.sigma_min = float(self.sigma_params.sigma_min)
-        self.rel_min = float(self.sigma_params.rel_min)
-        self.rel_max = float(self.sigma_params.rel_max)
+        self.rel_min   = float(self.sigma_params.rel_min)
+        self.rel_max   = float(self.sigma_params.rel_max)
 
-        # bounds
-        if lower_bound is None:
-            self.lower_bound = None
-        else:
-            self.lower_bound = np.asarray(lower_bound, dtype=float)
-
-        if upper_bound is None:
-            self.upper_bound = None
-        else:
-            self.upper_bound = np.asarray(upper_bound, dtype=float)
+        self.lower_bound = None if lower_bound is None else np.asarray(lower_bound, dtype=float)
+        self.upper_bound = None if upper_bound is None else np.asarray(upper_bound, dtype=float)
 
         self.sigma = None
         self.x_km1 = None
         self.x_km2 = None
 
+    def _lb_ub(self, n: int) -> Tuple[np.ndarray, np.ndarray]:
+        lb = self.lower_bound if self.lower_bound is not None else np.full(n, -np.inf)
+        ub = self.upper_bound if self.upper_bound is not None else np.full(n,  np.inf)
+        return np.asarray(lb, dtype=float).ravel(), np.asarray(ub, dtype=float).ravel()
+
+    # ------------------------------------------------------------------
+
     def init_asymptotes(self, x0: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n = int(x0.size)
-        lb_arr = self.lower_bound if self.lower_bound is not None else -np.inf * np.ones(n, dtype=float)
-        ub_arr = self.upper_bound if self.upper_bound is not None else np.inf * np.ones(n, dtype=float)
-        lb_arr = np.asarray(lb_arr, dtype=float).ravel()
-        ub_arr = np.asarray(ub_arr, dtype=float).ravel()
+        lb_arr, ub_arr = self._lb_ub(n)
 
-        self.sigma = np.empty(n, dtype=float)
-        for j in range(n):
-            if np.isinf(lb_arr[j]) or np.isinf(ub_arr[j]):
-                s0 = 1.0
-            else:
-                s0 = 0.5 * (ub_arr[j] - lb_arr[j])
-            s0 = max(s0, self.sigma_min)
-            self.sigma[j] = s0
+        # s0 = 0.5*(ub-lb) where both finite, else 1.0; then max with sigma_min
+        finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
+        s0 = np.where(finite, 0.5 * (ub_arr - lb_arr), 1.0)
+        self.sigma = np.maximum(s0, self.sigma_min)
 
         L = x0 - self.sigma
         U = x0 + self.sigma
@@ -61,49 +52,54 @@ class AsymptoteUpdater:
         self.x_km1 = x0.copy()
         return L, U
 
-    def update(self, x_km1: np.ndarray, x_kp1: np.ndarray, L: np.ndarray, U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def update(self, x_km1: np.ndarray, x_kp1: np.ndarray,
+               L: np.ndarray, U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n = x_km1.size
-        x_k = x_kp1
-        x_km1_local = x_km1
-        x_km2_local = self.x_km2 if self.x_km2 is not None else x_km1_local
+        x_k          = x_kp1
+        x_km1_local  = x_km1
+        x_km2_local  = self.x_km2 if self.x_km2 is not None else x_km1_local
 
         self.x_km2 = x_km1.copy()
         self.x_km1 = x_kp1.copy()
 
-        for j in range(n):
-            diff1 = x_k[j] - x_km1_local[j]
-            diff2 = x_km1_local[j] - x_km2_local[j]
-            prod = diff1 * diff2
-            if prod > 0.0:
-                self.sigma[j] = self.sigma[j] * self.expand
-            elif prod < 0.0:
-                self.sigma[j] = max(self.sigma[j] * self.contract, self.sigma_min)
+        lb_arr, ub_arr = self._lb_ub(n)
 
-            # relative bounds if global box known
-            lbj = self.lower_bound[j] if self.lower_bound is not None else -np.inf
-            ubj = self.upper_bound[j] if self.upper_bound is not None else np.inf
-            if not np.isinf(lbj) and not np.isinf(ubj):
-                width = ubj - lbj
-                self.sigma[j] = min(self.sigma[j], self.rel_max * width)
-                self.sigma[j] = max(self.sigma[j], self.rel_min * width)
+        # --- Svanberg expand / contract ---
+        diff1 = x_k       - x_km1_local    # (n,)
+        diff2 = x_km1_local - x_km2_local  # (n,)
+        prod  = diff1 * diff2               # (n,)
 
-            self.sigma[j] = max(self.sigma[j], self.sigma_min)
+        sigma = self.sigma.copy()
+        sigma = np.where(prod > 0.0, sigma * self.expand,
+                np.where(prod < 0.0, np.maximum(sigma * self.contract, self.sigma_min),
+                         sigma))
 
-        L_new = x_k - self.sigma
-        U_new = x_k + self.sigma
+        # --- relative bounds where box is fully finite ---
+        finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
+        width  = ub_arr - lb_arr                             # (n,)
+        sigma  = np.where(finite, np.clip(sigma, self.rel_min * width, self.rel_max * width), sigma)
+
+        # --- global sigma_min floor ---
+        sigma = np.maximum(sigma, self.sigma_min)
+
+        self.sigma = sigma
+
+        # --- new asymptotes ---
+        L_new = x_k - sigma
+        U_new = x_k + sigma
         if self.lower_bound is not None:
-            L_new = np.maximum(L_new, self.lower_bound)
+            L_new = np.maximum(L_new, lb_arr)
         if self.upper_bound is not None:
-            U_new = np.minimum(U_new, self.upper_bound)
+            U_new = np.minimum(U_new, ub_arr)
 
-        # ensure minimal width numerical safety
+        # --- minimal width safety ---
         widths = U_new - L_new
-        min_width = self.sigma_min
-        for j in range(n):
-            if widths[j] < min_width:
-                center = 0.5 * (U_new[j] + L_new[j])
-                L_new[j] = center - 0.5 * min_width
-                U_new[j] = center + 0.5 * min_width
-                self.sigma[j] = 0.5 * min_width
+        narrow = widths < self.sigma_min
+        if narrow.any():
+            center      = 0.5 * (U_new + L_new)
+            half        = 0.5 * self.sigma_min
+            L_new       = np.where(narrow, center - half, L_new)
+            U_new       = np.where(narrow, center + half, U_new)
+            self.sigma  = np.where(narrow, half, self.sigma)
 
         return L_new, U_new
