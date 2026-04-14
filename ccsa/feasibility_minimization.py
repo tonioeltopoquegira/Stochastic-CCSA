@@ -104,6 +104,6 @@ def feasibility_solver(L, U, x_k, g_k, grad_g_k, bounds):
     z0 = np.concatenate([x_k, np.array([1.0], dtype=float)])
     
     res = minimize(obj_z, z0, jac=grad_obj_z, method='SLSQP', bounds=bnds, constraints=cons,
-                   options={'maxiter': 200, 'ftol': 1e-9})
+                   options={'maxiter': 200, 'ftol': 1e-5})
     
     return res.x[:n], res.success

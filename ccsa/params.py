@@ -6,7 +6,7 @@ class MMA_RhoParams:
     softening: float = 0.5       # additive softening factor
     min_growth: float = 1.01     # multiplicative bump per iteration
     max_multiplier: float = 10.0  # max factor rho can grow per inner step
-    decay: float = 0.1          # multiplicative decay per outer iteration
+    decay: float = 0.4          # multiplicative decay per outer iteration # best 0.9
 
 @dataclass
 class MMA_SigmaParams:
@@ -18,21 +18,26 @@ class MMA_SigmaParams:
    
     
 
-def update_rho(rho, gap, w_val, rho_params: MMA_RhoParams):
+def multiplier_update_rho(rho, gap, w_val, rho_params: MMA_RhoParams):
     """
     Vectorized and scalar-safe rho update.
     """
     incr = gap / max(w_val, 1e-12)
-    rho_candidate = rho + rho_params.softening * incr
+    rho_new = rho + rho_params.softening * incr
 
     # upper growth cap: rho_new ≤ max_multiplier * rho
-    rho_cap = rho_params.max_multiplier * rho
+    rho_cap_max = rho_params.max_multiplier * rho
 
     # elementwise min
-    rho_new = np.minimum(rho_cap, rho_candidate)
+    rho_new = np.minimum(rho_cap_max, rho_new)
 
-    # lower floor: rho_new ≥ rho
-    rho_new = np.maximum(rho, rho_new)
+    rho_cap_min = rho * (1/rho_params.max_multiplier)
+
+    rho_new = np.maximum(rho_cap_min, rho_new)
+
+    print(rho_new)
+
+    rho_new = max(rho_new, 1e-4)
 
     return rho_new
 

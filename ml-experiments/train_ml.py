@@ -3,6 +3,11 @@ import time
 from pathlib import Path
 import json
 import pickle
+import sys
+from pathlib import Path
+
+# Add current directory to path to ensure local imports take precedence
+sys.path.insert(0, str(Path(__file__).parent))
 
 import matplotlib
 matplotlib.use("Agg")
@@ -15,7 +20,7 @@ import torch.nn as nn
 
 from class_models import MNIST_CNN, resnet32, resnet56
 from utils import set_seed, get_loaders, train_epoch, evaluate
-from optimizers import CCSAOptimizer
+from optim_torch import CCSATorchOptimizer
 
 from datetime import datetime
 
@@ -35,7 +40,12 @@ def run(args):
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print("[INFO] Device:", device)
 
+    # Use 0 workers for CPU (multiprocessing overhead + semaphore leaks)
+    num_workers = 0 if device.type == "cpu" else args.num_workers
+    print(f"[INFO] Using {num_workers} workers for data loading")
+    
     train_loader, test_loader = get_loaders(exp=args.exp, batch_size=args.batch_size,
+                                            num_workers=num_workers,
                                             pin_memory=(device.type == "cuda"))
 
     model_factory = lambda: get_model_for_exp(args.exp)
@@ -48,7 +58,7 @@ def run(args):
     with open(outdir / "run_params.json", "w") as f:
         json.dump(vars(args), f, indent=2)
 
-    optim_list = [args.opt] if args.opt else ["adamw", "ccsa"]
+    optim_list = [args.opt] if args.opt else [ "adamw", "ccsa"]
     all_results = {}
 
     for opt_name in optim_list:
@@ -61,15 +71,21 @@ def run(args):
             optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
             use_ccsa = False
         elif opt_name == "ccsa":
-            optimizer = CCSAOptimizer(model.parameters(),
-                                    lr=args.lr,
-                                    inner_gradients=args.inner_gradients,
-                                    always_improve=args.always_improve,
-                                    sigma_min=args.sigma_min,
-                                    maxeval=args.maxeval,
-                                    max_inner_eval=args.max_inner_eval,
-                                    verbose=args.verbose,
-                                    inner_eval_weight=args.inner_eval_weight)
+            optimizer = CCSATorchOptimizer(
+                model.parameters(),
+                lr=args.lr,
+                # CCSA configuration with explicit defaults
+                use_quadratic_surrogates=True,
+                conservative=False,
+                max_inner=1,  # Reduced from 5 to save memory
+                rho_init=1.0,
+                sigma_min=1e-2,
+                update_rule='multiplier',  
+                verbose=args.verbose,
+                inner_eval_weight=0.5,
+                update_rule_kwargs={'lr': 5e-1, 'beta1': 0.05, 'beta2': 0.2, 'eps': 1e-8,
+                'min_curv': 1e-4, 'max_curv': 10000.0}
+            )
             use_ccsa = True
 
         else:
@@ -115,9 +131,8 @@ def run(args):
                     f"val_eval_loss={val_eval_loss:.4f} val_eval_acc={val_eval_acc:.4f}"
                 )
         else:
-
             all_batch_losses, all_evals, logs = optimizer.optimize_training(
-                train_loader, model, criterion, device, args.epochs, test_loader=test_loader, version=args.version
+                train_loader, model, criterion, device, args.epochs, test_loader=test_loader
             )
 
         all_results[opt_name] = (all_batch_losses, all_evals, logs)
@@ -147,23 +162,60 @@ def run(args):
 
     print(f"[INFO] Saved results to {outdir}")
 
-    # Combined plotting
-    plt.figure(figsize=(8, 4))
+    # Combined plotting: batch-level training loss + epoch-level test loss
+    plt.figure(figsize=(12, 5))
+    
+    # Plot 1: Batch-level training loss
+    plt.subplot(1, 2, 1)
     for opt_name, (losses, evals, _) in all_results.items():
         x = np.array(evals, dtype=np.float32)
         y = np.array(losses, dtype=np.float32)
         if args.plot_eval_limit:
             mask = x <= args.plot_eval_limit
             x, y = x[mask], y[mask]
-        plt.plot(x, y, label=opt_name.upper())
+        plt.plot(x, y, label=opt_name.upper(), alpha=0.7)
     plt.xlabel("Cumulative weighted evals")
+    plt.xscale("log")
+    plt.yscale("log")
     plt.ylabel("Batch loss")
     plt.title(f"Batch loss vs evals ({args.exp})")
     plt.legend()
     if args.plot_ylim:
         plt.ylim(top=args.plot_ylim)
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 2: Epoch-level test loss
+    plt.subplot(1, 2, 2)
+    for opt_name, (_, _, logs) in all_results.items():
+        if "val_eval_loss" in logs and len(logs["val_eval_loss"]) > 0:
+            epochs = np.array(logs["epoch"], dtype=np.float32)
+            val_loss = np.array(logs["val_eval_loss"], dtype=np.float32)
+            plt.plot(epochs, val_loss, marker='o', label=opt_name.upper(), linewidth=2, markersize=6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test loss")
+    plt.title(f"Test loss per epoch ({args.exp})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    plt.savefig(outdir / "loss_vs_evals_combined.png", dpi=150)
+    plt.savefig(outdir / "train_loss_vs_evals.png", dpi=150)
+    plt.close()
+    
+    # Additional plot: Test accuracy per epoch
+    plt.figure(figsize=(8, 5))
+    for opt_name, (_, _, logs) in all_results.items():
+        if "val_eval_acc" in logs and len(logs["val_eval_acc"]) > 0:
+            epochs = np.array(logs["epoch"], dtype=np.float32)
+            val_acc = np.array(logs["val_eval_acc"], dtype=np.float32)
+            plt.plot(epochs, val_acc, marker='o', label=opt_name.upper(), linewidth=2, markersize=6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test accuracy")
+    plt.title(f"Test accuracy per epoch ({args.exp})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim([0, 1])
+    plt.tight_layout()
+    plt.savefig(outdir / "test_accuracy_per_epoch.png", dpi=150)
     plt.close()
 
 
@@ -178,11 +230,6 @@ if __name__ == "__main__":
     p.add_argument("--batch-size", type=int, dest="batch_size", default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=0.0)
-    p.add_argument("--inner-gradients", type=int, default=0)
-    p.add_argument("--always-improve", type=int, default=0)
-    p.add_argument("--sigma-min", type=float, default=1e-4)
-    p.add_argument("--maxeval", type=int, default=int(1e6))
-    p.add_argument("--max-inner-eval", type=int, default=5)   
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -190,8 +237,7 @@ if __name__ == "__main__":
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--plot-ylim", type=float, default=None)
     p.add_argument("--inner-eval-weight", type=float, default=0.5,
-               help="Fractional weight to count each CCSA inner eval (default 0.5).")
-    p.add_argument("--version", type=str, default="mma")
+                   help="Fractional weight for inner evals in cumulative counter (default 0.5)")
 
 
     args = p.parse_args()

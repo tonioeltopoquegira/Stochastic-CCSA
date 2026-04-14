@@ -3,7 +3,7 @@ import numpy as np
 from scipy.optimize import minimize
 import time
 
-from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, update_rho,
+from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, multiplier_update_rho,
                          AdamCurvParams, init_adam_curv_state,
                          adam_curv_update, adam_secant_update)
 from ccsa.asymptote import AsymptoteUpdater
@@ -14,7 +14,7 @@ from ccsa.feasibility_minimization import feasibility_solver
 # Modular MMA optimizer (flat parameter vector)
 # -------------------------
 class CCSAOptimizer: 
-    MMA_RHOMIN = 1e-5
+    MMA_RHOMAX = 10000.0
 
     def __init__(self,
                  params: np.ndarray,
@@ -329,6 +329,9 @@ class CCSAOptimizer:
         for inner in range(self.max_inner):
             sigma_vec = self.asym.sigma.copy()
 
+            # here used
+            print(f"sigma_vec: {sigma_vec}")
+            print(f"rho: {rho}")
             builder = DualSubproblemBuilder(
                 f_k=f_k, grad_f_k=grad_f_k, x_k=x_k, g_k=g_k, grad_g_k=grad_g_k,
                 lb=self.lb, ub=self.ub, sigma=sigma_vec, rho=rho, rho_c=self.rho_c,
@@ -418,7 +421,7 @@ class CCSAOptimizer:
                     if violation_f > 0.0:
                         # When per_coord_rho: rho is (n,), w_val is (n,), use element-wise
                         # When not: rho is scalar, w_val is scalar, use scalar
-                        rho = update_rho(rho, violation_f, w_val, self.rho_params)
+                        rho = multiplier_update_rho(rho, violation_f, w_val, self.rho_params)
                         self.metrics["curvature_updates"]["multiplier_on_rejection"] += 1
                         self.metrics["curvature_updates"]["total_updates"] += 1
                     if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
@@ -431,7 +434,7 @@ class CCSAOptimizer:
                                 # For constraints: rho_c is per-constraint (m,), w_val is per-coordinate (n,)
                                 # Use mean of w_val for constraint updates
                                 w_val_for_c = np.mean(w_val) if isinstance(w_val, np.ndarray) else w_val
-                                self.rho_c[mask] = update_rho(
+                                self.rho_c[mask] = multiplier_update_rho(
                                     self.rho_c[mask], violation_gc_1d[mask], w_val_for_c, self.rho_params
                                 )
                 wval_used = w_val
@@ -448,15 +451,26 @@ class CCSAOptimizer:
         #    L_new, U_new = self.L.copy(), self.U.copy()
 
         # decay not applied for adam_violation/adam_secant)
-        if self.update_rule == 'multiplier':
-            rho = self.rho_params.decay * rho
-            if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
-                self.rho_c = self.rho_params.decay * self.rho_c
 
-        # Minimum enforced for everyone
-        rho = max(rho, self.MMA_RHOMIN)
+        if m == 0 and self.update_rule == 'multiplier':
+            if violation_f > 0.0:
+            # When per_coord_rho: rho is (n,), w_val is (n,), use element-wise
+            # When not: rho is scalar, w_val is scalar, use scalar
+
+            #print(f"violation_f: {violation_f}, w_val: {w_val}")
+                rho = multiplier_update_rho(rho, violation_f, w_val, self.rho_params)
+                self.metrics["curvature_updates"]["multiplier_on_rejection"] += 1
+                self.metrics["curvature_updates"]["total_updates"] += 1
+
+        #if self.update_rule == 'multiplier':
+        rho = self.rho_params.decay * rho
         if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
-            self.rho_c = np.maximum(self.rho_c, self.MMA_RHOMIN)
+            self.rho_c = self.rho_params.decay * self.rho_c
+                
+        # Maximum enforced for everyone
+        rho = min(rho, self.MMA_RHOMAX)
+        if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
+            self.rho_c = np.minimum(self.rho_c, self.MMA_RHOMAX)
 
 
         # Update of asymptotes (NOT used in quadratic surrogate mode)

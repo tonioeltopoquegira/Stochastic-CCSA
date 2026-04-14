@@ -94,6 +94,7 @@ def train_epoch(model, loader, optimizer, criterion, device, show_progress=False
         loss_tensor = criterion(outputs, target)
         loss_tensor.backward()
         optimizer.step()
+        #print(f"Model parameters (first 5): {list(model.parameters())[0].data.flatten()[:5]}")
         batch_loss = float(loss_tensor.item())
         preds = outputs.argmax(dim=1)
         weighted_evals = 1.0  # 1 eval per batch w/ our convention

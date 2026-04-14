@@ -38,7 +38,7 @@ class AsymptoteUpdater:
 
         # s0 = 0.5*(ub-lb) where both finite, else 1.0; then max with sigma_min
         finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
-        s0 = np.where(finite, 0.5 * (ub_arr - lb_arr), 1.0)
+        s0 = np.where(finite, 0.5 * (ub_arr - lb_arr), 0.01)
         self.sigma = np.maximum(s0, self.sigma_min)
 
         L = x0 - self.sigma
@@ -64,25 +64,29 @@ class AsymptoteUpdater:
 
         lb_arr, ub_arr = self._lb_ub(n)
 
-        # --- Svanberg expand / contract ---
-        diff1 = x_k       - x_km1_local    # (n,)
-        diff2 = x_km1_local - x_km2_local  # (n,)
-        prod  = diff1 * diff2               # (n,)
+        # DISABLED: Keep sigma fixed at initialization to test hypothesis
+        # Original Svanberg expand / contract logic commented out
+        #diff1 = x_k       - x_km1_local    # (n,)
+        #diff2 = x_km1_local - x_km2_local  # (n,)
+        #prod  = diff1 * diff2               # (n,)
+        #
+        #sigma = self.sigma.copy()
+        #sigma = np.where(prod > 0.0, sigma * self.expand,
+        #        np.where(prod < 0.0, np.maximum(sigma * self.contract, self.sigma_min),
+        #                 sigma))
+        #
+        ## --- relative bounds where box is fully finite ---
+        #finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
+        #width  = ub_arr - lb_arr                             # (n,)
+        #sigma  = np.where(finite, np.clip(sigma, self.rel_min * width, self.rel_max * width), sigma)
+        #
+        ## --- global sigma_min floor ---
+        #sigma = np.maximum(sigma, self.sigma_min)
+        #
+        #self.sigma = sigma
 
+        # Keep sigma at current value (no updates)
         sigma = self.sigma.copy()
-        sigma = np.where(prod > 0.0, sigma * self.expand,
-                np.where(prod < 0.0, np.maximum(sigma * self.contract, self.sigma_min),
-                         sigma))
-
-        # --- relative bounds where box is fully finite ---
-        finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
-        width  = ub_arr - lb_arr                             # (n,)
-        sigma  = np.where(finite, np.clip(sigma, self.rel_min * width, self.rel_max * width), sigma)
-
-        # --- global sigma_min floor ---
-        sigma = np.maximum(sigma, self.sigma_min)
-
-        self.sigma = sigma
 
         # --- new asymptotes ---
         L_new = x_k - sigma

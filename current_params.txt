@@ -1,0 +1,7 @@
+For unconstrined MNIST:
+1. Sigma fixed at 0.01
+2. decay rho at 0.4
+3. multiplier
+4. rho_init 1.0
+
+
