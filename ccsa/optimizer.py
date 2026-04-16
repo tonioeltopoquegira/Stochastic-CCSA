@@ -368,7 +368,7 @@ class CCSAOptimizer:
             y_opt = np.zeros(m, dtype=float)
             if m > 0:
                 dual_solve_t0 = time.time()
-                obj_only, obj_with_grad = builder.build_dual_objective()
+                obj_only, obj_with_grad, grad_only = builder.build_dual_objective()
                 y0 = np.zeros(m, dtype=float)
                 dual_bounds = [(0.0, np.inf) for _ in range(m)]
                 method = 'projected_gd'
@@ -387,7 +387,7 @@ class CCSAOptimizer:
 
                 elif method == 'projected_gd':
                     
-                    y_opt, n_it = solve_dual_projected_gradient(obj_with_grad, m, lr=0.1, max_iter=10)
+                    y_opt, n_it = solve_dual_projected_gradient(grad_only, m, lr=0.1, max_iter=10)
 
                     n_fev = n_it 
                    

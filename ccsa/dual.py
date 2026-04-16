@@ -316,74 +316,104 @@ class DualSubproblemBuilder:
 
     def build_dual_objective(self):
         """
-        Returns (obj_only, obj_with_grad) closures suitable for scipy minimize with jac=True.
-        obj_with_grad(y) -> (value, grad)
+        Returns (obj_only, obj_with_grad, grad_only).
+    
+        All three are INDEPENDENT implementations — no wrappers calling each other.
+    
+        obj_only(y)      -> scalar          cost: O(m·n), skips grad
+        obj_with_grad(y) -> (scalar, grad)  cost: O(m·n), computes both
+        grad_only(y)     -> grad            cost: 2×O(m·n), skips value assembly
         """
-        
         import os
         debug_mode = os.environ.get('CCSA_DEBUG', '0') == '1'
-
-        def obj_and_grad(y):
-            if debug_mode:
-                print(f"    [DUAL_OBJ] y={y}")
+    
+        # shared helper: compute x*(y) — the closed-form primal optimum
+        # returns dx (clipped), safe_sigma2
+        def _compute_xstar(y):
+            safe_sigma2 = np.maximum(self.sigma ** 2, 1e-30)
+    
+            if self.m > 0:
+                y_act  = y[self._mask]
+                rho_y  = float(np.mean(self.rho)) + float(self._rho_c_masked @ y_act)
+                rho_y  = max(rho_y, 1e-15)
+                v      = self.grad_f_k + self._grad_g_masked.T @ y_act   # O(m·n)
+            else:
+                rho_y  = max(float(np.mean(self.rho)), 1e-15)
+                v      = self.grad_f_k.copy()
+    
+            dx = np.clip(-safe_sigma2 * v / rho_y, -self.sigma, self.sigma)
+            dx = np.clip(self.x_k + dx, self.lb, self.ub) - self.x_k
+            return dx, safe_sigma2
+    
+        # ---------------------------------------------------------------- #
+        #  obj_only: scalar value of -D(y), no gradient                     #
+        #  Uses reconstruct_xcandidate_from_y for tilde_f + val_extra       #
+        # ---------------------------------------------------------------- #
+        def obj_only(y):
             try:
-                x_candidate, tilde_f, tilde_gc, w_val, val_extra = self.reconstruct_xcandidate_from_y(y)
-                if debug_mode:
-                    print(f"      [RECONSTRUCT OK] tilde_f={tilde_f:.6e}, tilde_gc: min={tilde_gc.min():.6e}, max={tilde_gc.max():.6e}")
-                    print(f"      [RECONSTRUCT OK] w_val={w_val:.6e}, val_extra={val_extra:.6e}")
-                
+                x_candidate, tilde_f, tilde_gc, w_val, val_extra = \
+                    self.reconstruct_xcandidate_from_y(y)
                 val = tilde_f + val_extra
                 if self.m > 0:
-                    g_dot_y = float(np.dot(y, self.g_k))
-                    val += g_dot_y
-                    if debug_mode:
-                        print(f"      [DUAL_COMP] tilde_f={tilde_f:.6e}, val_extra={val_extra:.6e}, g_dot_y={g_dot_y:.6e}, total_val={val:.6e}")
+                    val += float(np.dot(y, self.g_k))
+                return -float(val)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                raise
+    
+        # ---------------------------------------------------------------- #
+        #  obj_with_grad: value AND gradient, for scipy jac=True            #
+        # ---------------------------------------------------------------- #
+        def obj_with_grad(y):
+            try:
+                x_candidate, tilde_f, tilde_gc, w_val, val_extra = \
+                    self.reconstruct_xcandidate_from_y(y)
+                val = tilde_f + val_extra
+                if self.m > 0:
+                    val += float(np.dot(y, self.g_k))
                     grad = -tilde_gc
                 else:
                     grad = np.zeros(0, dtype=float)
-                
+    
                 if debug_mode:
-                    print(f"      [DUAL_OBJ_RESULT] dual_obj=-val={-float(val):.6e}, grad_norm={np.linalg.norm(grad):.6e}")
+                    print(f"  [DUAL_OBJ] -D={-float(val):.6e} "
+                        f"grad_norm={np.linalg.norm(grad):.6e}")
+    
                 return -float(val), grad
             except Exception as e:
-                print(f"    [ERROR] Exception in obj_and_grad: {e}")
-                import traceback
-                traceback.print_exc()
+                import traceback; traceback.print_exc()
                 raise
-
-        def obj_only(y):
-            v, _ = obj_and_grad(y)
-            return v
-
-        def obj_with_grad(y):
-            return obj_and_grad(y)
-
-        return obj_only, obj_with_grad
     
-
-
-def solve_dual_projected_gradient(obj_with_grad, m, lr=0.1, max_iter=20, tol=1e-6):
-    """
-    max_{y >= 0}  D(y)  via projected gradient ascent.
+        # ---------------------------------------------------------------- #
+        #  grad_only: gradient ONLY, no value                               #
+        #  Skips tilde_f, val_extra, dual scalar assembly entirely.         #
+        #  Cost: exactly 2 × O(m·n) matrix-vector products.                #
+        # ---------------------------------------------------------------- #
+        def grad_only(y):
+            dx, safe_sigma2 = _compute_xstar(y)                # O(m·n)
     
-    Each iteration:
-      1. Evaluate gradient of D at current y  — ONE obj_with_grad call
-      2. Gradient ascent step
-      3. Project to y >= 0
+            dx2sig = 0.5 * np.sum((dx / np.maximum(self.sigma, 1e-30)) ** 2)
     
-    Total calls: max_iter + 1  (typically converges in 5-10 steps)
-    """
-    y = np.zeros(m, dtype=np.float64)
+            grad_D = self._g_k_clean.copy()                    # (m,)
+            if self.m > 0:
+                grad_D[self._mask] += (
+                    self._grad_g_masked @ dx                   # O(m·n)
+                    + self._rho_c_masked * dx2sig
+                )
+            return grad_D   # = ∇D(y)
+    
+        return obj_only, obj_with_grad, grad_only
+        
 
-    for _ in range(max_iter):
-        neg_D, neg_grad = obj_with_grad(y)
-        grad = -neg_grad          # ∇D(y) = -grad(neg_D)
 
-        y_new = np.maximum(y + lr * grad, 0.0)   # step + project
-
+def solve_dual_projected_gradient(grad_only, m, lr=0.1, max_iter=10, tol=1e-6):
+    y    = np.zeros(m, dtype=np.float64)
+    n_it = 0
+    for n_it in range(max_iter):
+        grad  = grad_only(y)                        # 2 × O(m·n), nothing else
+        y_new = np.maximum(y + lr * grad, 0.0)
         if np.linalg.norm(y_new - y) < tol:
             y = y_new
             break
         y = y_new
-
-    return y
+    return y, n_it
