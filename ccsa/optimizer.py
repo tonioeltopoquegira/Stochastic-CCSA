@@ -7,7 +7,7 @@ from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, multiplier_update_rho,
                          AdamCurvParams, init_adam_curv_state,
                          adam_curv_update, adam_secant_update)
 from ccsa.asymptote import AsymptoteUpdater
-from ccsa.dual import DualSubproblemBuilder, solve_dual_active_set
+from ccsa.dual import DualSubproblemBuilder, solve_dual_projected_gradient
 from ccsa.feasibility_minimization import feasibility_solver
 
 # -------------------------
@@ -371,7 +371,7 @@ class CCSAOptimizer:
                 obj_only, obj_with_grad = builder.build_dual_objective()
                 y0 = np.zeros(m, dtype=float)
                 dual_bounds = [(0.0, np.inf) for _ in range(m)]
-                method = 'L-BFGS-B'
+                method = 'projected_gd'
                 if method == 'L-BFGS-B':
                     # L-BFGS-B: supports bounds, but can be slower for large m
                     res = minimize(lambda yy: obj_with_grad(yy),
@@ -381,19 +381,23 @@ class CCSAOptimizer:
                                    bounds=dual_bounds,
                                    options={'maxiter': 5, 'ftol': 1e-2})
                     y_opt = res.x
+                    n_it = res.nit
+                    n_fev = res.nfev
                     
-                    # Diagnostic: track solver performance when slow
-                    dual_time = time.time() - dual_solve_t0
-                    if dual_time > 5.0:  # Only report slow solves
-                        print(f"    [DUAL_SOLVE SLOW] time={dual_time:.3f}s, nit={res.nit}, nfev={res.nfev}, message={res.message}")
 
-                elif method == 'CG':
-
-                    y_opt = solve_dual_active_set(obj_with_grad, m)
-
+                elif method == 'projected_gd':
                     
+                    y_opt, n_it = solve_dual_projected_gradient(obj_with_grad, m, lr=0.1, max_iter=10)
+
+                    n_fev = n_it 
+                   
                 else:
                     raise ValueError(f"Unknown method: {method}")
+                
+                # Diagnostic: track solver performance when slow
+                dual_time = time.time() - dual_solve_t0
+                if dual_time > 5.0:  # Only report slow solves
+                    print(f"    [DUAL_SOLVE SLOW] time={dual_time:.3f}s, nit={res.nit}, nfev={res.nfev}")
                 timer['dual_solve'] = time.time() - dual_solve_t0
    
                 
@@ -435,6 +439,11 @@ class CCSAOptimizer:
                         feas_t0 = time.time()
                         x_bar= feasibility_solver(self.L, self.U, x_candidate, g_k, grad_g_k, (self.lb, self.ub),
                                                            rho_c=self.rho_c, method='cg')
+
+                        #x_bar= feasibility_solver(x_candidate, g_k, grad_g_k, bounds=(self.lb, self.ub), L=self.L, U=self.U,
+                        #                                   rho_c=self.rho_c)
+                        
+                
                         timer['feasibility'] = time.time() - feas_t0
                     else:
                         # Either no constraints, constraints satisfied, or violations too large

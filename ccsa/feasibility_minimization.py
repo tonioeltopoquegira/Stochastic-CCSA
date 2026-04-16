@@ -45,110 +45,36 @@ def eval_mma_constraint_surrogates(L, U, x_k, g_k, grad_g_k, x):
     
     return surrogates, grads
 
-
-def solve_feasibility_quadratic_closed_form(x_k, g_k, grad_g_k, rho_c, sigma, lb, ub, max_iter=10):
+def eval_quadratic_surrogates(x_k, g_k, grad_g_k, rho_c, sigma, x):
     """
-    Solve the feasibility problem with CLOSED-FORM solution for quadratic surrogates.
-    
-    Minimize: sum_i max(g_i(x), 0)^2
-    where g_i(x) = g_k[i] + grad_g_k[i]·(x-x_k) + 0.5·rho_c[i]·||x-x_k||²_σ
-    
-    Since the surrogates are separable quadratic, we can derive a closed-form solution
-    by solving the first-order optimality conditions for active constraints.
-    
-    The key insight: for the penalty objective, the gradient is:
-        d/dx [sum_i max(g_i, 0)^2] = sum_i 2·max(g_i,0)·(grad_g_k[i] + rho_c[i]·(x-x_k)/sigma²)
-    
-    Setting to 0 and solving:
-        (sum_i active_i · rho_c[i] / sigma²) · (x - x_k) = -sum_i active_i · grad_g_k[i]
-    
-    This is an m×n system that we solve iteratively (active set method):
-    - Start with all constraints potentially active
-    - Solve linear system for (x - x_k)
-    - Clip to bounds
-    - Check which constraints are actually satisfied
-    - Iterate until convergence
-    
-    Parameters:
-    - x_k, g_k, grad_g_k: current point and constraint info
-    - rho_c: per-constraint curvature (shape m,)
-    - sigma: per-coordinate step sizes (shape n,)
-    - lb, ub: bounds
-    - max_iter: max active set iterations
-    
+    Quadratic CCSA surrogate for each constraint.
+ 
+    surrogate_i(x) = g_k[i] + grad_g_k[i]^T dx
+                     + 0.5 * rho_c[i] * sum_j dx_j^2 / sigma_j^2
+ 
     Returns:
-    - x_opt: solution point
-    - n_iter: number of iterations performed
+        surrogates: (m,)
+        grads:      (m, n)  d surrogate_i / d x_j
     """
-    n = x_k.size
-    m = g_k.size
-    
-    # Compute sigma squared (per-coordinate)
-    sigma2 = sigma * sigma
-    sigma2_inv = 1.0 / (sigma2 + 1e-30)  # avoid division by zero
-    
-    # Active set method: start assuming all constraints are potentially active
-    active = np.ones(m, dtype=bool)
-    x = x_k.copy()
-    
-    for iteration in range(max_iter):
-        dx = x - x_k
-        
-        # Evaluate linear surrogates at current x
-        linear_terms = g_k + grad_g_k @ dx
-        
-        # Update active set: constraint i is active if surrogate > -1e-6
-        # (we include slightly violated constraints to avoid cycling)
-        active_new = linear_terms > -1e-6
-        
-        if np.array_equal(active, active_new) and iteration > 0:
-            # Active set converged
-            break
-        
-        active = active_new
-        n_active = np.sum(active)
-        
-        if n_active == 0:
-            # All constraints satisfied, return x_k
-            x = x_k.copy()
-            break
-        
-        # Build and solve the linear system:
-        # (sum_i active_i · rho_c[i] / sigma²) · dx = -sum_i active_i · grad_g_k[i]
-        #
-        # LHS matrix (n×n): Diagonal(sum_i active_i · rho_c[i] / sigma²)
-        # Since surrogates are separable, the Hessian is diagonal!
-        hess_diag = np.zeros(n)
-        for i in range(m):
-            if active[i]:
-                hess_diag += rho_c[i] * sigma2_inv
-        
-        # Add small regularization to avoid ill-conditioning
-        hess_diag += 1e-8
-        
-        # RHS vector (n,): -sum_i active_i · grad_g_k[i]
-        rhs = np.zeros(n)
-        for i in range(m):
-            if active[i]:
-                rhs -= grad_g_k[i]
-        
-        # Solve diagonal system: dx = rhs / hess_diag
-        dx_new = rhs / hess_diag
-        
-        # Update x with step
-        x_new = x_k + dx_new
-        
-        # Clip to bounds
-        x_new = np.clip(x_new, lb, ub)
-        
-        # Check convergence
-        if np.linalg.norm(x_new - x) < 1e-9:
-            x = x_new
-            break
-        
-        x = x_new
-    
-    return x, iteration + 1
+    dx     = x - x_k                                        # (n,)
+    sigma2 = np.maximum(sigma * sigma, 1e-30)               # (n,)
+ 
+    # Linear part
+    linear = g_k + grad_g_k @ dx                            # (m,)
+ 
+    # Quadratic part: same scaled norm for all i, scaled by rho_c[i]
+    dx2_over_sigma2 = (dx * dx) / sigma2                    # (n,)
+    quad_scalar     = 0.5 * np.sum(dx2_over_sigma2)         # scalar
+    quad_per_constr = rho_c * quad_scalar                   # (m,)
+ 
+    surrogates = linear + quad_per_constr                   # (m,)
+ 
+    # Gradient: d/dx_j surrogate_i = grad_g_k[i,j] + rho_c[i] * dx_j / sigma_j^2
+    dx_over_sigma2 = dx / sigma2                            # (n,)
+    grads = grad_g_k + rho_c[:, np.newaxis] * dx_over_sigma2[np.newaxis, :]  # (m,n)
+ 
+    return surrogates, grads
+
 
 
 def feasibility_solver(L, U, x_k, g_k, grad_g_k, bounds, rho_c=None, sigma=None, method='closed-form'):
@@ -245,6 +171,8 @@ def feasibility_solver(L, U, x_k, g_k, grad_g_k, bounds, rho_c=None, sigma=None,
         # CG does NOT support bounds - project manually instead
         res = minimize(obj_and_grad, x_k, method='CG', jac=True,
                        options={'maxiter': 10, 'gtol': 1e-2})
+
+    # here prob needs the epigraph formulation
         
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -254,3 +182,317 @@ def feasibility_solver(L, U, x_k, g_k, grad_g_k, bounds, rho_c=None, sigma=None,
    
     return res.x
 
+
+
+import numpy as np
+from scipy.optimize import minimize
+import time
+ 
+ 
+
+ 
+ 
+def feasibility_solver(x_k, g_k, grad_g_k, bounds,
+                       rho_c=None, sigma=None,
+                       L=None, U=None,
+                       maxiter=50, ftol=1e-6, verbose=False):
+    """
+    Epigraph feasibility solver with quadratic surrogates.
+ 
+    Solves:
+        min_{x, alpha}   alpha
+        s.t.  surrogate_i(x) - alpha <= 0,  i = 0,...,m-1
+              lb <= x <= ub
+ 
+    Args:
+        x_k:       current iterate (n,)
+        g_k:       constraint values at x_k (m,)
+        grad_g_k:  constraint Jacobian (m, n)
+        bounds:    (lb, ub) arrays or None
+        rho_c:     per-constraint curvature (m,). Default: ones
+        sigma:     per-coordinate step size (n,). Default: 0.01*ones
+        L, U:      kept for API compatibility (unused for quadratic)
+        maxiter:   SLSQP max iterations
+        ftol:      SLSQP tolerance
+        verbose:   print diagnostics
+ 
+    Returns:
+        x_bar: (n,) feasibility-minimizing point
+    """
+    n = x_k.size
+    m = g_k.size
+ 
+    if rho_c is None:
+        rho_c = np.ones(m, dtype=np.float64)
+    if sigma is None:
+        sigma = np.ones(n, dtype=np.float64) * 0.01
+ 
+    rho_c = np.asarray(rho_c, dtype=np.float64).ravel()
+    sigma = np.asarray(sigma, dtype=np.float64).ravel()
+ 
+    g_max = float(np.max(g_k))
+    if g_max <= 1e-7:
+        return x_k.copy()
+ 
+    t0 = time.time()
+    if verbose:
+        print(f'[FEAS-EPI] n={n}, m={m}, max_g={g_max:.4e}')
+ 
+    # ------------------------------------------------------------------ #
+    #  Augmented variable z = [x(n), alpha(1)]                            #
+    # ------------------------------------------------------------------ #
+ 
+    def obj(z):
+        return float(z[n])
+ 
+    def obj_jac(z):
+        g      = np.zeros(n + 1)
+        g[n]   = 1.0
+        return g
+ 
+    # SLSQP 'ineq': fun(z) >= 0
+    # We write: alpha - surrogate_i(x) >= 0
+    def make_con(i):
+        def cfun(z):
+            x_    = z[:n]
+            alpha = z[n]
+            surr, _ = eval_quadratic_surrogates(
+                x_k, g_k, grad_g_k, rho_c, sigma, x_)
+            return float(alpha - surr[i])
+ 
+        def cjac(z):
+            x_    = z[:n]
+            surr, grads = eval_quadratic_surrogates(
+                x_k, g_k, grad_g_k, rho_c, sigma, x_)
+            jac       = np.zeros(n + 1)
+            jac[:n]   = -grads[i]    # d/dx (alpha - surr_i) = -grad_surr_i
+            jac[n]    = 1.0          # d/dalpha = 1
+            return jac
+ 
+        return {'type': 'ineq', 'fun': cfun, 'jac': cjac}
+ 
+    constraints = [make_con(i) for i in range(m)]
+ 
+    # Bounds on x; alpha unconstrained
+    if bounds is not None:
+        lb_arr, ub_arr = bounds
+        x_bnds = [
+            (None if np.isneginf(lb_arr[j]) else float(lb_arr[j]),
+             None if np.isposinf(ub_arr[j]) else float(ub_arr[j]))
+            for j in range(n)
+        ]
+    else:
+        x_bnds = [(None, None)] * n
+    all_bnds = x_bnds + [(None, None)]   # alpha free
+ 
+    # Warm start
+    alpha0 = g_max * 1.1 + 1e-4
+    z0     = np.concatenate([x_k.copy(), [alpha0]])
+ 
+    res = minimize(obj, z0, jac=obj_jac,
+                   method='SLSQP',
+                   bounds=all_bnds,
+                   constraints=constraints,
+                   options={'maxiter': maxiter, 'ftol': ftol})
+ 
+    x_bar = res.x[:n]
+    if bounds is not None:
+        x_bar = np.clip(x_bar, lb_arr, ub_arr)
+ 
+    if verbose:
+        alpha_f = float(res.x[n])
+        print(f'[FEAS-EPI] {time.time()-t0:.2f}s | '
+              f'nit={res.nit} | success={res.success} | '
+              f'alpha*={alpha_f:.4e}')
+ 
+    return x_bar
+ 
+import numpy as np
+from scipy.linalg import solve as _slv
+import time
+ 
+ 
+def _solve_lambda_qp(M, b, m):
+    """
+    Solve  min_{lambda>=0, sum(lambda)=1}  0.5*lambda^T M lambda - b^T lambda
+    via active-set on the KKT conditions.
+    M is (m x m) SPD, b is (m,).
+    Returns lambda (m,) >= 0 with sum = 1.
+    """
+    # Convert sum=1 constraint via substitution or solve with equality
+    # Use active-set: start with all free, fix negatives
+    lam  = np.zeros(m)
+    free = np.ones(m, dtype=bool)
+ 
+    # Augment for equality: solve [M, 1; 1^T, 0][lam; nu] = [b; 1]
+    for _ in range(m + 2):
+        nf  = np.sum(free)
+        if nf == 0:
+            break
+        idx = np.where(free)[0]
+        Mf  = M[np.ix_(idx, idx)]
+        bf  = b[idx]
+ 
+        # Add equality sum(lam_free)=1 via KKT
+        A = np.zeros((nf + 1, nf + 1))
+        A[:nf, :nf] = Mf
+        A[:nf, nf]  = 1.0
+        A[nf, :nf]  = 1.0
+        rhs = np.zeros(nf + 1)
+        rhs[:nf] = bf
+        rhs[nf]  = 1.0
+ 
+        try:
+            sol = _slv(A, rhs, check_finite=False)
+        except Exception:
+            sol, _, _, _ = np.linalg.lstsq(A, rhs, rcond=None)
+ 
+        lf = sol[:nf]
+        ln = np.zeros(m)
+        ln[idx] = lf
+ 
+        neg = free & (ln < -1e-12)
+        if not np.any(neg):
+            lam = np.maximum(ln, 0.0)
+            break
+        free[np.argmin(ln)] = False
+ 
+    lam = np.maximum(lam, 0.0)
+    s   = lam.sum()
+    if s > 1e-15:
+        lam /= s
+    else:
+        lam = np.ones(m) / m
+    return lam
+ 
+ 
+def feasibility_solver(L, U, x_k, g_k, grad_g_k, bounds,
+                       rho_c=None, sigma=None, method=None,
+                       verbose=False):
+    """
+    Closed-form epigraph feasibility for quadratic CCSA surrogates.
+ 
+    Args:
+        L, U:      asymptote arrays (API compat only, unused)
+        x_k:       current iterate (n,)
+        g_k:       constraint values (m,)
+        grad_g_k:  Jacobian (m, n)
+        bounds:    (lb, ub) or None
+        rho_c:     per-constraint curvature (m,)
+        sigma:     per-coord step size (n,)
+        method:    ignored (API compat)
+        verbose:   print diagnostics
+ 
+    Returns:
+        x_bar: (n,) solution
+    """
+    n = x_k.size
+    m = g_k.size
+ 
+    if rho_c is None:
+        rho_c = np.ones(m, dtype=np.float64)
+    if sigma is None:
+        sigma = np.ones(n, dtype=np.float64) * 0.01
+ 
+    rho_c = np.asarray(rho_c, dtype=np.float64).ravel()
+    sigma = np.asarray(sigma, dtype=np.float64).ravel()
+ 
+    if bounds is not None:
+        lb, ub = np.asarray(bounds[0]), np.asarray(bounds[1])
+    else:
+        lb = np.full(n, -np.inf)
+        ub = np.full(n,  np.inf)
+ 
+    t0    = time.time()
+    g_max = float(np.max(g_k))
+ 
+    if g_max <= 1e-7:
+        return x_k.copy()
+ 
+    sigma2 = np.maximum(sigma * sigma, 1e-30)   # (n,)
+ 
+    # ------------------------------------------------------------------ #
+    #  Build the (m x m) dual QP                                          #
+    #                                                                      #
+    #  Optimal dx for dual weights lambda:                                 #
+    #    dx_j = -sigma_j^2 * (G^T lam)_j / (rho_c^T lam)                #
+    #                                                                      #
+    #  Substituting into surrogate_i = g_k[i] + G[i]^T dx + rho_c[i]*Q  #
+    #  where Q = 0.5*||dx/sigma||^2, gives:                               #
+    #                                                                      #
+    #    surrogate_i(lam) = g_k[i]                                        #
+    #      - (rho_c^T lam)^{-1} * sum_j G[i,j]*G^T[j]*lam * sigma_j^2   #
+    #      + 0.5*rho_c[i]/(rho_c^T lam)^2 * ||G^T lam * sigma||^2        #
+    #                                                                      #
+    #  This is a rational function of lam. We linearise by solving a      #
+    #  sequence of (m x m) QPs updated with the current rho_lam estimate. #
+    # ------------------------------------------------------------------ #
+ 
+    # Sigma-scaled gradient: W[i,j] = G[i,j]*sigma[j],  shape (m,n)
+    W = grad_g_k * sigma[np.newaxis, :]
+ 
+    # C = W @ W^T,  shape (m,m): C[i,j] = sum_k G[i,k]*G[j,k]*sigma_k^2
+    C = W @ W.T
+ 
+    lam = np.ones(m, dtype=np.float64) / m   # warm start
+ 
+    x_bar = x_k.copy()
+    best_alpha = np.inf
+ 
+    for iteration in range(10):
+        rho_lam = float(rho_c @ lam)
+        if rho_lam < 1e-15:
+            rho_lam = 1e-15
+ 
+        # Dual QP matrices (from surrogate equalisation condition)
+        # M[i,j] = C[i,j] / rho_lam^2 * (rho_c[i]*rho_c[j] is absorbed below)
+        # Simpler: build M directly from the linearised surrogate
+        #   surrogate_i ≈ g_k[i] - C[i,:] @ lam / rho_lam
+        #                 + 0.5*rho_c[i] * (lam^T C lam) / rho_lam^2
+        # Minimise max_i surrogate_i(lam) <=> solve dual QP:
+        #   min_{lam>=0, sum=1}  -g_k^T lam + 0.5 * lam^T M_eff lam
+        # where M_eff[i,j] = C[i,j]/rho_lam  (linearised)
+        M_eff = C / rho_lam
+        b_vec = g_k.copy()   # dual linear term = g_k
+ 
+        lam_new = _solve_lambda_qp(M_eff, b_vec, m)
+ 
+        # Compute dx from lam_new
+        rho_lam_new  = float(rho_c @ lam_new)
+        if rho_lam_new < 1e-15:
+            rho_lam_new = 1e-15
+ 
+        g_lam = grad_g_k.T @ lam_new          # (n,)
+        dx    = -sigma2 * g_lam / rho_lam_new  # (n,)
+ 
+        # Clip to sigma and bounds
+        dx    = np.clip(dx, -sigma, sigma)
+        x_try = np.clip(x_k + dx, lb, ub)
+        dx    = x_try - x_k
+ 
+        # Evaluate surrogates
+        dx2_sigma2 = (dx * dx) / sigma2
+        quad       = 0.5 * np.sum(dx2_sigma2)
+        surr       = g_k + grad_g_k @ dx + rho_c * quad
+ 
+        alpha = float(np.max(surr))
+        if alpha < best_alpha:
+            best_alpha = alpha
+            x_bar = x_try.copy()
+ 
+        # Convergence: check if lambda changed
+        if np.linalg.norm(lam_new - lam) < 1e-8:
+            lam = lam_new
+            break
+        lam = lam_new
+ 
+    if verbose:
+        dx_f   = x_bar - x_k
+        surr_f = g_k + grad_g_k @ dx_f + rho_c * 0.5 * np.sum((dx_f/sigma)**2)
+        print(f'[FEAS] {time.time()-t0:.4f}s | '
+              f'iters={iteration+1} | '
+              f'alpha*={float(np.max(surr_f)):.4e} | '
+              f'spread={float(np.max(surr_f)-np.min(surr_f[surr_f>-1e10])):.4e} | '
+              f'init_max_g={g_max:.4e}')
+ 
+    return x_bar

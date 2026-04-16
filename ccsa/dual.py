@@ -362,42 +362,28 @@ class DualSubproblemBuilder:
     
 
 
-def solve_dual_active_set(obj_with_grad, m):
+def solve_dual_projected_gradient(obj_with_grad, m, lr=0.1, max_iter=20, tol=1e-6):
     """
-    Solve  min_{lambda >= 0}  neg_D(lambda)  where neg_D is quadratic.
-    Uses active-set on the KKT conditions. ~2.7x faster than L-BFGS-B
-    for m=10, same solution. No finite differences — recovers H via
-    one gradient evaluation per variable (m+1 total obj calls).
+    max_{y >= 0}  D(y)  via projected gradient ascent.
+    
+    Each iteration:
+      1. Evaluate gradient of D at current y  — ONE obj_with_grad call
+      2. Gradient ascent step
+      3. Project to y >= 0
+    
+    Total calls: max_iter + 1  (typically converges in 5-10 steps)
     """
-    eps = 1e-5
-    # Recover linear coefficient q and Hessian H
-    _, g0 = obj_with_grad(np.zeros(m, dtype=float))
-    q = -g0.copy()
-    H = np.zeros((m, m), dtype=float)
-    for i in range(m):
-        ei = np.zeros(m); ei[i] = eps
-        _, gi = obj_with_grad(ei)
-        H[i, :] = (-gi + g0) / eps
-    H = 0.5 * (H + H.T) + 1e-10 * np.eye(m)
+    y = np.zeros(m, dtype=np.float64)
 
-    # Active-set KKT: find lam >= 0 s.t. H*lam = q on free variables
-    lam  = np.zeros(m, dtype=float)
-    free = np.ones(m, dtype=bool)
-    for _ in range(m + 1):
-        if not np.any(free):
-            break
-        idx = np.where(free)[0]
-        try:
-            lf = _slv(H[np.ix_(idx, idx)], q[idx],
-                    assume_a='pos', check_finite=False)
-        except Exception:
-            lf, _, _, _ = np.linalg.lstsq(
-                H[np.ix_(idx, idx)], q[idx], rcond=None)
-        ln = np.zeros(m); ln[idx] = lf
-        neg = free & (ln < -1e-12)
-        if not np.any(neg):
-            lam = np.maximum(ln, 0.0)
-            break
-        free[np.argmin(ln)] = False
+    for _ in range(max_iter):
+        neg_D, neg_grad = obj_with_grad(y)
+        grad = -neg_grad          # ∇D(y) = -grad(neg_D)
 
-    return np.maximum(lam, 0.0)
+        y_new = np.maximum(y + lr * grad, 0.0)   # step + project
+
+        if np.linalg.norm(y_new - y) < tol:
+            y = y_new
+            break
+        y = y_new
+
+    return y
