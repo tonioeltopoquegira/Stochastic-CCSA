@@ -35,7 +35,7 @@ def multiplier_update_rho(rho, gap, w_val, rho_params: MMA_RhoParams):
 
     rho_new = np.maximum(rho_cap_min, rho_new)
 
-    print(rho_new)
+    #print(rho_new)
 
     rho_new = max(rho_new, 1e-4)
 
