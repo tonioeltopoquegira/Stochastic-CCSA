@@ -38,7 +38,7 @@ class AsymptoteUpdater:
 
         # s0 = 0.5*(ub-lb) where both finite, else 1.0; then max with sigma_min
         finite = np.isfinite(lb_arr) & np.isfinite(ub_arr)
-        s0 = np.where(finite, 0.5 * (ub_arr - lb_arr), 0.01)
+        s0 = np.where(finite, 0.5 * (ub_arr - lb_arr), 0.01) # sigma
         self.sigma = np.maximum(s0, self.sigma_min)
 
         L = x0 - self.sigma

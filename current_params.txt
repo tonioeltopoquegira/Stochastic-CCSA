@@ -1,7 +1,21 @@
 For unconstrined MNIST:
 1. Sigma fixed at 0.01
-2. decay rho at 0.4
+2. decay rho at 0.4 
 3. multiplier
 4. rho_init 1.0
 
+---> surrogates used were MMA
+---> decreased rho at every step irregardless
+---> LBFGS
+--> unfeasible accept!!!
+
+
+
+
+MINMAX MNIST
+
+Issues: 
+1. Why dual so variable?
+2. would a more efficient implementation help?
+3. right now the feasibility is not running an epigraph formulation type of stuff... it used to do it!!
 

@@ -7,7 +7,7 @@ from ccsa.params import (MMA_RhoParams, MMA_SigmaParams, multiplier_update_rho,
                          AdamCurvParams, init_adam_curv_state,
                          adam_curv_update, adam_secant_update)
 from ccsa.asymptote import AsymptoteUpdater
-from ccsa.dual import DualSubproblemBuilder
+from ccsa.dual import DualSubproblemBuilder, solve_dual_active_set
 from ccsa.feasibility_minimization import feasibility_solver
 
 # -------------------------
@@ -261,17 +261,22 @@ class CCSAOptimizer:
 
 
     def step(self):
+        step_t0 = time.time()
+        timer = {'fun_eval': 0, 'dual_build': 0, 'dual_solve': 0, 'feasibility': 0, 'asym_update': 0}
+        
         x_k = self.x_k.copy()
         L = self.L.copy()
         U = self.U.copy()
         rho = float(self.rho)
 
         # Evaluate f and gradient at x_k
+        fun_t0 = time.time()
         if self.df is None:
             f_k, grad_f_k = self.fun(x_k, grad=True)
         else:
             f_k = float(self.fun(x_k))
             grad_f_k = np.asarray(self.df(x_k), dtype=float).ravel()
+        timer['fun_eval'] = time.time() - fun_t0
 
         # Evaluate constraints at x_k
         if self.g is not None:
@@ -329,35 +334,73 @@ class CCSAOptimizer:
         for inner in range(self.max_inner):
             sigma_vec = self.asym.sigma.copy()
 
+            # DEBUG: Print step info
+            import os
+            if os.environ.get('CCSA_DEBUG', '0') == '1':
+                print(f"\n[STEP] Starting inner loop {inner}:")
+                print(f"  f_k={f_k:.6e}, f has grad={self.df is not None}")
+                print(f"  g_k shape={g_k.shape}, has jacobian={self.dg is not None}")
+                if g_k.size > 0:
+                    num_violated = np.sum(g_k > 1e-6)
+                    print(f"  g_k: min={g_k.min():.6e}, max={g_k.max():.6e}, num_active={np.sum(g_k > -1e-6)}, num_violated={num_violated}")
+                    print(f"  grad_g_k shape={grad_g_k.shape}")
+                    if grad_g_k.size > 0:
+                        row_norms = np.linalg.norm(grad_g_k, axis=1)
+                        print(f"  grad_g_k row norms: min={row_norms.min():.6e}, max={row_norms.max():.6e}")
+                        
+                        # CHECK IF ANY CONSTRAINT IS POSITIVE (VIOLATED)
+                        if np.any(g_k > 1e-8):
+                            violated_idx = np.where(g_k > 1e-8)[0]
+                            print(f"  ⚠️  VIOLATED CONSTRAINTS DETECTED: {list(violated_idx)}")
+                            for idx in violated_idx:
+                                print(f"      Constraint {idx}: g[{idx}]={g_k[idx]:.6e}, grad_norm={row_norms[idx]:.6e}")
+
             # here used
-            print(f"sigma_vec: {sigma_vec}")
-            print(f"rho: {rho}")
+            dual_build_t0 = time.time()
             builder = DualSubproblemBuilder(
                 f_k=f_k, grad_f_k=grad_f_k, x_k=x_k, g_k=g_k, grad_g_k=grad_g_k,
                 lb=self.lb, ub=self.ub, sigma=sigma_vec, rho=rho, rho_c=self.rho_c,
                 quadratic=self.use_quadratic_surrogates
             )
+            timer['dual_build'] = time.time() - dual_build_t0
 
             # Determine x_candidate
             y_opt = np.zeros(m, dtype=float)
             if m > 0:
+                dual_solve_t0 = time.time()
                 obj_only, obj_with_grad = builder.build_dual_objective()
                 y0 = np.zeros(m, dtype=float)
                 dual_bounds = [(0.0, np.inf) for _ in range(m)]
+                method = 'L-BFGS-B'
+                if method == 'L-BFGS-B':
+                    # L-BFGS-B: supports bounds, but can be slower for large m
+                    res = minimize(lambda yy: obj_with_grad(yy),
+                                   y0,
+                                   method='L-BFGS-B',
+                                   jac=True,
+                                   bounds=dual_bounds,
+                                   options={'maxiter': 5, 'ftol': 1e-2})
+                    y_opt = res.x
+                    
+                    # Diagnostic: track solver performance when slow
+                    dual_time = time.time() - dual_solve_t0
+                    if dual_time > 5.0:  # Only report slow solves
+                        print(f"    [DUAL_SOLVE SLOW] time={dual_time:.3f}s, nit={res.nit}, nfev={res.nfev}, message={res.message}")
+
+                elif method == 'CG':
+
+                    y_opt = solve_dual_active_set(obj_with_grad, m)
+
+                    
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+                timer['dual_solve'] = time.time() - dual_solve_t0
+   
                 
-                res = minimize(lambda yy: obj_with_grad(yy),
-                            y0,
-                            method='L-BFGS-B',
-                            jac=True,
-                            bounds=dual_bounds,
-                            options={'maxiter': 10, 'ftol': 1e-4})
-               
-                y_opt = res.x
 
             #print("before reconstructing x_candidate from y_opt")
             t = time.time()
             x_candidate, tilde_f, tilde_gc, w_val, val_extra = builder.reconstruct_xcandidate_from_y(y_opt)
-            #print(f"after reconstructing x_candidate from y_opt: {time.time() - t:.4f} seconds")
 
             # Evaluate true f and g (no gradient needed)
             f_cur = float(self.fun(x_candidate))
@@ -372,23 +415,30 @@ class CCSAOptimizer:
 
             # Acceptance criteria
             improved = f_cur < f_best
-            feasible_cur = np.all(gcur <= 0.0) if m > 0 else True
+            feasible_cur = np.all(gcur <= 0.0) if m > 0 else True 
             inner_done = tilde_f >= f_cur and (np.all(tilde_gc >= gcur) if m > 0 else True)
             accept = False
 
-            if improved and (inner_done or feasible_cur or m == 0):
+        
+            if improved and (feasible_cur or m == 0): # inner_done or 
+                #print(f"  [ACCEPT] Accepting new point: f_cur={f_cur:.6e} < f_best={f_best:.6e}, inner_done={inner_done}, feasible_cur={feasible_cur}")
                 accept = True
                 accept_type = "feasible_accept" if feasible_cur and m > 0 else "improve_only"
-            elif m > 0 and not feasible_cur and np.max(gcur) < np.max(np.maximum(g_k, 0.0)):
-                accept = True
-                accept_type = "infeasible_accept"
+                '''elif m > 0 and not feasible_cur and np.max(gcur) < np.max(np.maximum(g_k, 0.0)):
+                    accept = True
+                    accept_type = "infeasible_accept"
+                    print(f"  [ACCEPT] Accepting infeasible point with reduced max constraint violation: max(gcur)={gcur.max():.6e} < max(g_k)={g_k.max():.6e}")'''
             else:
                 if not self.conservative:
+   
                     if m > 0:
-                        # run feasibility minimization using current curvature (only if there are constraints)
-                        x_bar, success = feasibility_solver(self.L, self.U, x_k, g_k, grad_g_k, (self.lb, self.ub))
+                        feas_t0 = time.time()
+                        x_bar= feasibility_solver(self.L, self.U, x_candidate, g_k, grad_g_k, (self.lb, self.ub),
+                                                           rho_c=self.rho_c, method='cg')
+                        timer['feasibility'] = time.time() - feas_t0
                     else:
-                        # no constraints: use candidate point directly
+                        # Either no constraints, constraints satisfied, or violations too large
+                        # Use candidate point directly and let outer loop handle it
                         x_bar = x_candidate.copy()
                     
                     # evaluate function and constraints at x_bar (NO gradient)
@@ -415,6 +465,8 @@ class CCSAOptimizer:
                 x_best = x_candidate.copy()
                 g_best = gcur.copy() if m > 0 else np.zeros(0, dtype=float)
                 wval_used = w_val
+                if self.update_rule == 'multiplier':
+                    rho = self.rho_params.decay * rho            
                 break
             else:
                 if self.update_rule == 'multiplier':
@@ -424,6 +476,7 @@ class CCSAOptimizer:
                         rho = multiplier_update_rho(rho, violation_f, w_val, self.rho_params)
                         self.metrics["curvature_updates"]["multiplier_on_rejection"] += 1
                         self.metrics["curvature_updates"]["total_updates"] += 1
+                        print(f"  [RHO UPDATE] Objective violation detected: {violation_f:.6e}. Updating to rho={rho:.6e}")
                     if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
                         # Ensure sizes match before boolean indexing
                         if self.rho_c.size == m:
@@ -444,28 +497,35 @@ class CCSAOptimizer:
         # Update of asymptotes (NOT used in quadratic surrogate mode)
         #if not self.use_quadratic_surrogates:
         #print("before asymptote update")
-        t = time.time()
+        asym_t0 = time.time()
         L_new, U_new = self.asym.update(x_km1=x_k, x_kp1=x_best, L=self.L.copy(), U=self.U.copy())
+        timer['asym_update'] = time.time() - asym_t0
         #print(f"after asymptote update: {time.time() - t:.4f} seconds")
         #else:
         #    L_new, U_new = self.L.copy(), self.U.copy()
 
         # decay not applied for adam_violation/adam_secant)
 
-        if m == 0 and self.update_rule == 'multiplier':
-            if violation_f > 0.0:
-            # When per_coord_rho: rho is (n,), w_val is (n,), use element-wise
-            # When not: rho is scalar, w_val is scalar, use scalar
+        #print(f"  [RHO UPDATE] objective rho: {rho:.6e}, constraint rho_c: {self.rho_c if m > 0 else 'N/A'}")
 
-            #print(f"violation_f: {violation_f}, w_val: {w_val}")
-                rho = multiplier_update_rho(rho, violation_f, w_val, self.rho_params)
-                self.metrics["curvature_updates"]["multiplier_on_rejection"] += 1
-                self.metrics["curvature_updates"]["total_updates"] += 1
-
-        #if self.update_rule == 'multiplier':
-        rho = self.rho_params.decay * rho
-        if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
-            self.rho_c = self.rho_params.decay * self.rho_c
+        if m > 0 and self.rho_c is not None and self.update_rule == 'multiplier':
+            for i in range(m):
+                if g_k[i] > 0.0:
+                    # Constraint i is violated at current point — tighten its surrogate
+                    # Scale increase proportional to violation magnitude
+                    self.rho_c[i] = multiplier_update_rho(self.rho_c[i], violation_gc[i], w_val, self.rho_params)
+                # Decay only if satisfied
+                else:
+                    # Use decay_c if set, otherwise use decay
+                    decay_rate = self.rho_params.decay_c if self.rho_params.decay_c is not None else self.rho_params.decay
+                    self.rho_c[i] = max(
+                        self.rho_c[i] * decay_rate,
+                        self.rho_params.rho_min if hasattr(self.rho_params, 'rho_min') else 1e-6
+                    )
+        # Before decreasing with all the iterations
+        #rho = self.rho_params.decay * rho
+        #if m > 0 and self.rho_c is not None and self.rho_c.size > 0:
+        #    self.rho_c = self.rho_params.decay * self.rho_c
                 
         # Maximum enforced for everyone
         rho = min(rho, self.MMA_RHOMAX)
@@ -593,6 +653,11 @@ class CCSAOptimizer:
         constraint_violation = float(np.max(g_best)) if g_best.size > 0 else 0.0
         if self.store_history:
             self.metrics["violation_history"].append(constraint_violation)
+        
+        # Print timing summary (only print if feasibility solver was called or other significant time)
+        timer['total'] = time.time() - step_t0
+        if timer['feasibility'] > 0.5 or timer['total'] > 3.0:
+            print(f"  [TIMING] step={timer['total']:.3f}s | fun={timer['fun_eval']:.3f}s | dual_build={timer['dual_build']:.3f}s | dual_solve={timer['dual_solve']:.3f}s | feasibility={timer['feasibility']:.3f}s | asym={timer['asym_update']:.3f}s")
  
         return f_best, g_best, dict(self.metrics)
 

@@ -1,0 +1,350 @@
+"""
+Min-Max Training with CCSA Optimizer.
+
+This script reuses the existing train_ml.py infrastructure, just adding adversarial
+loss functions and per-label error tracking.
+"""
+
+import argparse
+import time
+from pathlib import Path
+import json
+import pickle
+import sys
+from pathlib import Path
+from collections import defaultdict
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+import torch
+import torch.optim as optim
+import torch.nn as nn
+
+from class_models import MNIST_CNN, resnet32, resnet56
+from utils import set_seed, get_loaders, train_epoch, evaluate
+from optim_torch import CCSATorchOptimizer
+
+from datetime import datetime
+
+
+def get_model_for_exp(exp):
+    if exp == "mnist_cnn":
+        return MNIST_CNN()
+    elif exp == "cifar10_resnet32":
+        return resnet32(num_classes=10)
+    elif exp == "cifar100_resnet56":
+        return resnet56(num_classes=100)
+    else:
+        raise ValueError(f"Unknown experiment: {exp}")
+
+
+def get_num_classes(exp):
+    if exp == "mnist_cnn":
+        return 10
+    elif exp == "cifar10_resnet32":
+        return 10
+    elif exp == "cifar100_resnet56":
+        return 100
+    else:
+        raise ValueError(f"Unknown experiment: {exp}")
+
+
+def compute_per_label_max_errors(model, test_loader, device, num_classes):
+    """
+    Compute maximum classification error per label on test set.
+    
+    Returns:
+        dict: label -> max error (loss) for samples with that label
+    """
+    model.eval()
+    per_label_errors = defaultdict(list)
+    ce_unreduced = nn.CrossEntropyLoss(reduction='none')
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            outputs = model(data)
+            losses = ce_unreduced(outputs, target)
+            
+            for label in range(num_classes):
+                mask = target == label
+                if mask.any():
+                    per_label_errors[label].extend(losses[mask].cpu().numpy().tolist())
+    
+    # Return max loss per label
+    return {label: float(np.max(errs)) if errs else 0.0 
+            for label, errs in per_label_errors.items()}
+
+
+def run(args):
+    set_seed(args.seed)
+    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    print("[INFO] Device:", device)
+
+    # Use 0 workers for CPU (multiprocessing overhead + semaphore leaks)
+    num_workers = 0 if device.type == "cpu" else args.num_workers
+    print(f"[INFO] Using {num_workers} workers for data loading")
+    
+    train_loader, test_loader = get_loaders(exp=args.exp, batch_size=args.batch_size,
+                                            num_workers=num_workers,
+                                            pin_memory=(device.type == "cuda"))
+
+    model_factory = lambda: get_model_for_exp(args.exp)
+    criterion = nn.CrossEntropyLoss()
+    num_classes = get_num_classes(args.exp)
+    
+    # Debug mode for constraint analysis
+    debug_constraints = getattr(args, 'debug_constraints', False)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    outdir = Path(args.outdir) / f"{args.exp}_adversarial_seed{args.seed}_{timestamp}"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    with open(outdir / "run_params.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    optim_list = [args.opt] if args.opt else ["adamw", "ccsa"]
+    all_results = {}
+
+    for opt_name in optim_list:
+        model = model_factory().to(device)
+
+        if opt_name == "adam":
+            optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            use_ccsa = False
+        elif opt_name == "adamw":
+            optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            use_ccsa = False
+        elif opt_name == "ccsa":
+            optimizer = CCSATorchOptimizer(
+                model.parameters(),
+                lr=args.lr,
+                use_quadratic_surrogates=True,
+                conservative=False,
+                max_inner=1,
+                rho_init=1.0,
+                sigma_min=1e-2,
+                update_rule='multiplier',  
+                verbose=args.verbose,
+                inner_eval_weight=0.5,
+                loss_fn_type='adversarial_minmax',  # Is this needed??
+                update_rule_kwargs={'lr': 5e-1, 'beta1': 0.05, 'beta2': 0.2, 'eps': 1e-8,
+                'min_curv': 1e-4, 'max_curv': 10000.0}
+            )
+            use_ccsa = True
+        else:
+            raise ValueError(f"Unknown optimizer {opt_name}")
+
+        print(f"[INFO] Running optimizer: {opt_name.upper()}")
+
+        if not use_ccsa:
+            # ===== Standard AdamW training =====
+            cumulative_eval = 0.0
+            all_batch_losses, all_evals = [], []
+            logs = {
+                "epoch": [],
+                "train_eval_loss": [],
+                "train_eval_acc": [],
+                "val_eval_loss": [],
+                "val_eval_acc": [],
+                "time": [],
+            }
+            per_label_error_history = {}
+            t0 = time.time()
+            
+            for epoch in range(1, args.epochs + 1):
+                tr_loss, tr_acc, batch_losses, batch_evals = train_epoch(
+                    model, train_loader, optimizer, criterion, device,
+                    show_progress=True, desc=f"Epoch {epoch}"
+                )
+                all_batch_losses.extend(batch_losses)
+                for e in batch_evals:
+                    cumulative_eval += e
+                    all_evals.append(cumulative_eval)
+
+                train_eval_loss, train_eval_acc = evaluate(model, train_loader, criterion, device)
+                val_eval_loss, val_eval_acc = evaluate(model, test_loader, criterion, device)
+
+                logs["epoch"].append(epoch)
+                logs["train_eval_loss"].append(train_eval_loss)
+                logs["train_eval_acc"].append(train_eval_acc)
+                logs["val_eval_loss"].append(val_eval_loss)
+                logs["val_eval_acc"].append(val_eval_acc)
+                logs["time"].append(time.time() - t0)
+
+                # Compute per-label errors
+                per_label_errors = compute_per_label_max_errors(model, test_loader, device, num_classes)
+                per_label_error_history[epoch] = per_label_errors
+
+                print(
+                    f"Epoch {epoch}/{args.epochs} | "
+                    f"train_eval_loss={train_eval_loss:.4f} train_eval_acc={train_eval_acc:.4f} | "
+                    f"val_eval_loss={val_eval_loss:.4f} val_eval_acc={val_eval_acc:.4f}"
+                )
+        else:
+            # ===== CCSA training with constrained adversarial formulation =====
+            all_batch_losses, all_evals, logs = optimizer.optimize_training_constrained_adversarial(
+                train_loader, model, criterion, device, args.epochs, num_classes, test_loader=test_loader
+            )
+            
+            # Compute per-label errors at each epoch
+            per_label_error_history = {}
+            if "epoch" in logs and len(logs["epoch"]) > 0:
+                for epoch in logs["epoch"]:
+                    per_label_errors = compute_per_label_max_errors(model, test_loader, device, num_classes)
+                    per_label_error_history[epoch] = per_label_errors
+
+        all_results[opt_name] = (all_batch_losses, all_evals, logs, per_label_error_history)
+
+    # Save the results
+    save_dict = {}
+    serializable_logs = {}
+    for opt_name, (losses, evals, logs, per_label_hist) in all_results.items():
+        save_dict[f"{opt_name}_losses"] = np.array(losses, dtype=np.float32)
+        save_dict[f"{opt_name}_evals"] = np.array(evals, dtype=np.float32)
+
+        serial_logs = {}
+        for k, v in logs.items():
+            if isinstance(v, (list, tuple, np.ndarray)):
+                serial_logs[k] = np.array(v).tolist()
+            else:
+                serial_logs[k] = v
+        serializable_logs[opt_name] = serial_logs
+
+    np.savez_compressed(outdir / "results.npz", **save_dict)
+
+    with open(outdir / "logs.json", "w") as f:
+        json.dump(serializable_logs, f, indent=2)
+
+    with open(outdir / "all_results.pkl", "wb") as f:
+        pickle.dump(all_results, f)
+
+    print(f"[INFO] Saved results to {outdir}")
+
+    # ===== PLOTTING =====
+    
+    # Plot 1: Batch-level training loss vs cumulative evals (log-log)
+    plt.figure(figsize=(8, 6))
+    for opt_name, (losses, evals, _, _) in all_results.items():
+        x = np.array(evals, dtype=np.float32)
+        y = np.array(losses, dtype=np.float32)
+        valid_idx = (x > 0) & (y > 0)
+        if valid_idx.any():
+            plt.plot(x[valid_idx], y[valid_idx], label=opt_name.upper(), alpha=0.7)
+    plt.xlabel("Cumulative weighted evals")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.ylabel("Batch loss")
+    plt.title(f"Batch loss vs evals ({args.exp})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(outdir / "plot_01_batch_loss_vs_evals.png", dpi=150)
+    plt.close()
+    
+    # Plot 2: Epoch-level test loss
+    plt.figure(figsize=(8, 6))
+    for opt_name, (_, _, logs, _) in all_results.items():
+        if "val_eval_loss" in logs and len(logs["val_eval_loss"]) > 0:
+            epochs = np.array(logs["epoch"], dtype=np.float32) if "epoch" in logs else np.arange(1, len(logs["val_eval_loss"]) + 1)
+            val_loss = np.array(logs["val_eval_loss"], dtype=np.float32)
+            plt.plot(epochs, val_loss, marker='o', label=opt_name.upper(), linewidth=2, markersize=6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test loss")
+    plt.title(f"Test loss per epoch ({args.exp})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(outdir / "plot_02_epoch_test_loss.png", dpi=150)
+    plt.close()
+    
+    # Plot 3: Test accuracy per epoch
+    plt.figure(figsize=(8, 6))
+    for opt_name, (_, _, logs, _) in all_results.items():
+        if "val_eval_acc" in logs and len(logs["val_eval_acc"]) > 0:
+            epochs = np.array(logs["epoch"], dtype=np.float32) if "epoch" in logs else np.arange(1, len(logs["val_eval_acc"]) + 1)
+            val_acc = np.array(logs["val_eval_acc"], dtype=np.float32)
+            plt.plot(epochs, val_acc, marker='o', label=opt_name.upper(), linewidth=2, markersize=6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test accuracy")
+    plt.title(f"Test accuracy per epoch ({args.exp})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim([0, 1])
+    plt.tight_layout()
+    plt.savefig(outdir / "plot_03_test_accuracy.png", dpi=150)
+    plt.close()
+    
+    # Plot 4: Per-label error distribution (one barplot per optimizer and epoch)
+    for opt_name, (_, _, logs, per_label_hist) in all_results.items():
+        if "epoch" not in logs or len(logs["epoch"]) == 0:
+            continue
+            
+        epochs = logs["epoch"]
+        num_epochs = len(epochs)
+        
+        fig, axes = plt.subplots(1, num_epochs, figsize=(5 * num_epochs, 5))
+        if num_epochs == 1:
+            axes = [axes]
+        
+        for i, epoch in enumerate(epochs):
+            ax = axes[i]
+            
+            # Get per-label errors for this epoch
+            if epoch in per_label_hist:
+                label_errors = per_label_hist[epoch]
+                labels_list = sorted(label_errors.keys())
+                errors = [label_errors[l] for l in labels_list]
+            else:
+                labels_list = list(range(num_classes))
+                errors = [0.0] * num_classes
+            
+            # Plot barplot with log scale
+            bars = ax.bar(labels_list, errors, color='steelblue', alpha=0.7, edgecolor='black')
+            ax.set_yscale('log')
+            ax.set_xlabel("Label", fontsize=11)
+            ax.set_ylabel("Max Error (log scale)", fontsize=11)
+            ax.set_title(f"{opt_name.upper()} - Epoch {epoch}", fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='y', which='both')
+        
+        plt.tight_layout()
+        plt.savefig(outdir / f"plot_04_per_label_error_dist_{opt_name}.png", dpi=150)
+        plt.close()
+
+    print("[INFO] Plots saved:")
+    print("       - plot_01_batch_loss_vs_evals.png")
+    print("       - plot_02_epoch_test_loss.png")
+    print("       - plot_03_test_accuracy.png")
+    print("       - plot_04_per_label_error_dist_*.png (one per optimizer)")
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Adversarial Min-Max Training with CCSA")
+    p.add_argument("--exp", choices=["mnist_cnn", "cifar10_resnet32", "cifar100_resnet56"], required=True)
+    p.add_argument("--opt", choices=["adam", "adamw", "ccsa"])
+    p.add_argument("--epochs", type=int, default=15)
+    p.add_argument("--batch-size", type=int, dest="batch_size", default=128)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=0.0)
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--outdir", type=str, default="./runs_adversarial")
+    p.add_argument("--num-workers", type=int, default=4)
+
+    args = p.parse_args()
+    run(args)
+
+
+
