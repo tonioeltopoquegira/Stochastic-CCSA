@@ -54,12 +54,12 @@ def get_num_classes(exp):
         raise ValueError(f"Unknown experiment: {exp}")
 
 
-def compute_per_label_max_errors(model, test_loader, device, num_classes):
+def compute_per_label_avg_errors(model, test_loader, device, num_classes):
     """
-    Compute maximum classification error per label on test set.
+    Compute average classification error per label on test set.
     
     Returns:
-        dict: label -> max error (loss) for samples with that label
+        dict: label -> average error (loss) for samples with that label
     """
     model.eval()
     per_label_errors = defaultdict(list)
@@ -76,8 +76,8 @@ def compute_per_label_max_errors(model, test_loader, device, num_classes):
                 if mask.any():
                     per_label_errors[label].extend(losses[mask].cpu().numpy().tolist())
     
-    # Return max loss per label
-    return {label: float(np.max(errs)) if errs else 0.0 
+    # Return average loss per label
+    return {label: float(np.mean(errs)) if errs else 0.0 
             for label, errs in per_label_errors.items()}
 
 
@@ -108,7 +108,7 @@ def run(args):
     with open(outdir / "run_params.json", "w") as f:
         json.dump(vars(args), f, indent=2)
 
-    optim_list = [args.opt] if args.opt else ["adamw", "ccsa"]
+    optim_list = [args.opt] if args.opt else ["ccsa", "adamw"]
     all_results = {}
 
     for opt_name in optim_list:
@@ -178,7 +178,7 @@ def run(args):
                 logs["time"].append(time.time() - t0)
 
                 # Compute per-label errors
-                per_label_errors = compute_per_label_max_errors(model, test_loader, device, num_classes)
+                per_label_errors = compute_per_label_avg_errors(model, test_loader, device, num_classes)
                 per_label_error_history[epoch] = per_label_errors
 
                 print(
@@ -196,7 +196,7 @@ def run(args):
             per_label_error_history = {}
             if "epoch" in logs and len(logs["epoch"]) > 0:
                 for epoch in logs["epoch"]:
-                    per_label_errors = compute_per_label_max_errors(model, test_loader, device, num_classes)
+                    per_label_errors = compute_per_label_avg_errors(model, test_loader, device, num_classes)
                     per_label_error_history[epoch] = per_label_errors
 
         all_results[opt_name] = (all_batch_losses, all_evals, logs, per_label_error_history)
@@ -256,6 +256,7 @@ def run(args):
             plt.plot(epochs, val_loss, marker='o', label=opt_name.upper(), linewidth=2, markersize=6)
     plt.xlabel("Epoch")
     plt.ylabel("Test loss")
+    plt.yscale("log")
     plt.title(f"Test loss per epoch ({args.exp})")
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -280,40 +281,58 @@ def run(args):
     plt.savefig(outdir / "plot_03_test_accuracy.png", dpi=150)
     plt.close()
     
-    # Plot 4: Per-label error distribution (one barplot per optimizer and epoch)
-    for opt_name, (_, _, logs, per_label_hist) in all_results.items():
-        if "epoch" not in logs or len(logs["epoch"]) == 0:
-            continue
-            
-        epochs = logs["epoch"]
-        num_epochs = len(epochs)
+    # Plot 4: Per-label error distribution (all optimizers together with different colors)
+    # Get unique epochs across all optimizers
+    all_epochs_set = set()
+    for opt_name, (_, _, logs, _) in all_results.items():
+        if "epoch" in logs:
+            all_epochs_set.update(logs["epoch"])
+    
+    if all_epochs_set:
+        epochs_list = sorted(list(all_epochs_set))
+        num_epochs = len(epochs_list)
         
-        fig, axes = plt.subplots(1, num_epochs, figsize=(5 * num_epochs, 5))
+        # Color map for optimizers
+        colors = plt.cm.Set2(np.linspace(0, 1, len(all_results)))
+        opt_colors = {opt_name: colors[i] for i, opt_name in enumerate(all_results.keys())}
+        
+        fig, axes = plt.subplots(1, num_epochs, figsize=(6 * num_epochs, 5))
         if num_epochs == 1:
             axes = [axes]
         
-        for i, epoch in enumerate(epochs):
-            ax = axes[i]
+        for epoch_idx, epoch in enumerate(epochs_list):
+            ax = axes[epoch_idx]
             
-            # Get per-label errors for this epoch
-            if epoch in per_label_hist:
-                label_errors = per_label_hist[epoch]
-                labels_list = sorted(label_errors.keys())
-                errors = [label_errors[l] for l in labels_list]
-            else:
-                labels_list = list(range(num_classes))
-                errors = [0.0] * num_classes
+            # Collect errors from all optimizers for this epoch
+            x_offset = 0
+            bar_width = 0.8 / len(all_results)  # Divide bar width by number of optimizers
             
-            # Plot barplot with log scale
-            bars = ax.bar(labels_list, errors, color='steelblue', alpha=0.7, edgecolor='black')
+            for opt_idx, (opt_name, (_, _, logs, per_label_hist)) in enumerate(all_results.items()):
+                if epoch in per_label_hist:
+                    label_errors = per_label_hist[epoch]
+                    labels_list = sorted(label_errors.keys())
+                    errors = [label_errors[l] for l in labels_list]
+                else:
+                    labels_list = list(range(num_classes))
+                    errors = [0.0] * num_classes
+                
+                # Plot bars for this optimizer, offset by optimizer index
+                x_pos = np.arange(len(labels_list)) + opt_idx * bar_width
+                ax.bar(x_pos, errors, bar_width, label=opt_name.upper(), 
+                       color=opt_colors[opt_name], alpha=0.8, edgecolor='black', linewidth=0.5)
+            
             ax.set_yscale('log')
             ax.set_xlabel("Label", fontsize=11)
-            ax.set_ylabel("Max Error (log scale)", fontsize=11)
-            ax.set_title(f"{opt_name.upper()} - Epoch {epoch}", fontsize=12, fontweight='bold')
+            ax.set_ylabel("Average Error (log scale)", fontsize=11)
+            ax.set_title(f"Epoch {epoch}", fontsize=12, fontweight='bold')
+            ax.set_xticks(np.arange(num_classes) + bar_width * (len(all_results) - 1) / 2)
+            ax.set_xticklabels(range(num_classes))
             ax.grid(True, alpha=0.3, axis='y', which='both')
+            if epoch_idx == 0:
+                ax.legend(loc='upper left', fontsize=10)
         
         plt.tight_layout()
-        plt.savefig(outdir / f"plot_04_per_label_error_dist_{opt_name}.png", dpi=150)
+        plt.savefig(outdir / "plot_04_per_label_error_dist_all_optimizers.png", dpi=150)
         plt.close()
 
     print("[INFO] Plots saved:")

@@ -406,6 +406,7 @@ class CCSAOptimizer:
             t = time.time()
             x_candidate, tilde_f, tilde_gc, w_val, val_extra = builder.reconstruct_xcandidate_from_y(y_opt)
 
+
             # Evaluate true f and g (no gradient needed)
             f_cur = float(self.fun(x_candidate))
 
@@ -423,20 +424,32 @@ class CCSAOptimizer:
             inner_done = tilde_f >= f_cur and (np.all(tilde_gc >= gcur) if m > 0 else True)
             accept = False
 
+            t_k = float(x_k[-1])
+
         
             if improved and (feasible_cur or m == 0): # inner_done or 
                 #print(f"  [ACCEPT] Accepting new point: f_cur={f_cur:.6e} < f_best={f_best:.6e}, inner_done={inner_done}, feasible_cur={feasible_cur}")
                 accept = True
                 accept_type = "feasible_accept" if feasible_cur and m > 0 else "improve_only"
-                '''elif m > 0 and not feasible_cur and np.max(gcur) < np.max(np.maximum(g_k, 0.0)):
+                ''' elif m > 0 and not feasible_cur and np.max(gcur) < np.max(np.maximum(g_k, 0.0)):
                     accept = True
                     accept_type = "infeasible_accept"
                     print(f"  [ACCEPT] Accepting infeasible point with reduced max constraint violation: max(gcur)={gcur.max():.6e} < max(g_k)={g_k.max():.6e}")'''
+                t_cand = float(x_candidate[-1])
+                #print(f"  [T] feasible_accept: t_k={t_k:.6f} → t_cand={t_cand:.6f} "
+                #    f"({'UP ↑' if t_cand > t_k else 'down ↓'}) "
+                #    f"f_cur={f_cur:.6f} f_best={f_best:.6f} "
+                #    f"sum(y)={float(np.sum(y_opt)):.4f}")
             else:
                 if not self.conservative:
    
                     if m > 0:
                         feas_t0 = time.time()
+                        
+                        # FOR MINMAX EPIGRAPH ONLY!!!!!!
+                        #grad_g_k_theta = grad_g_k.copy()
+                        #grad_g_k_theta[:, -1] = 0.0    # zero the t column
+
                         x_bar= feasibility_solver(self.L, self.U, x_candidate, g_k, grad_g_k, (self.lb, self.ub),
                                                            rho_c=self.rho_c, method='cg')
 
@@ -449,6 +462,10 @@ class CCSAOptimizer:
                         # Either no constraints, constraints satisfied, or violations too large
                         # Use candidate point directly and let outer loop handle it
                         x_bar = x_candidate.copy()
+                        t_bar = float(x_bar[-1])
+                        #print(f"  [T] feasibility_min: t_k={t_k:.6f} → t_bar={t_bar:.6f} "
+                        #    f"({'UP ↑' if t_bar > t_k else 'down ↓'}) "
+                        #    f"sum(y)={float(np.sum(y_opt)):.4f}")
                     
                     # evaluate function and constraints at x_bar (NO gradient)
                     f_bar = float(self.fun(x_bar))
@@ -472,8 +489,13 @@ class CCSAOptimizer:
             if accept:
                 f_best = float(f_cur)
                 x_best = x_candidate.copy()
+                t_final = float(x_best[-1])
+                #print(f"  [T] accepted: t_k={t_k:.6f} → t_final={t_final:.6f} "
+                #    f"({'UP ↑' if t_final > t_k else 'down ↓'}) "
+                #    f"accept_type={accept_type}")
                 g_best = gcur.copy() if m > 0 else np.zeros(0, dtype=float)
                 wval_used = w_val
+
                 if self.update_rule == 'multiplier':
                     rho = self.rho_params.decay * rho            
                 break
@@ -544,6 +566,12 @@ class CCSAOptimizer:
 
         # Update of asymptotes (NOT used in quadratic surrogate mode)
         self.x_k = x_best.copy()
+        t_new = float(self.x_k[-1])   # after self.x_k = x_best.copy()
+        #if t_new > t_k + 1e-8:
+            #print(f"  [T-INCREASE] {t_k:.6f} → {t_new:.6f} (+{t_new-t_k:.6f}) "
+            #    f"accept_type={accept_type} "
+            #    f"sum(y_opt)={float(np.sum(y_opt)) if m>0 else 0:.4f} "
+            #    f"f_k={f_k:.6f} f_best={f_best:.6f}")
         self.L = L_new
         self.U = U_new
         self.rho = float(rho)

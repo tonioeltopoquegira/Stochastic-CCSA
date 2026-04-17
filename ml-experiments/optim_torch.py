@@ -18,6 +18,8 @@ from typing import Tuple, List, Optional, Callable
 from tqdm import tqdm
 import sys
 from pathlib import Path
+import tempfile
+import os
 
 # Import the standalone CCSA optimizer
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -473,6 +475,7 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
     
             lines = [
                 f"\n{'─'*62}",
+                f"[STEP DIAGNOSTIC TRAIN] ",
                 f"  step {step:>5d} | t = {t_val:.6f} | "
                 f"violated = {len(violations)}/{len(mean_losses)}  "
                 f"max_viol = {max_viol:+.6f}",
@@ -490,19 +493,6 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
         # ------------------------------------------------------------------ #
         #  Estimate a good t_init: max mean class loss on first batch          #
         # ------------------------------------------------------------------ #
-        def estimate_t_init():
-            data, target = next(iter(train_loader))
-            data, target = data.to(device), target.to(device)
-            model.eval()
-            ce = torch.nn.CrossEntropyLoss(reduction="none")
-            with torch.no_grad():
-                losses = ce(model(data), target)
-            means = []
-            for k in range(num_classes):
-                mask = target == k
-                if mask.any():
-                    means.append(losses[mask].mean().item())
-            return float(max(means)) * 1.2 if means else 5.0   # 20% headroom
     
         t_init = 3.365
         print(f"[EPIGRAPH] t_init = {t_init:.4f}")
@@ -510,6 +500,110 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
         # Augmented variable: [theta (n_theta,), t (1,)]
         x0_aug = np.concatenate([x0, np.array([t_init], dtype=np.float64)])
         n_aug  = x0_aug.size   # n_theta + 1
+        
+        # ------------------------------------------------------------------ #
+        #  Tracking best params based on worst-case error                    #
+        # ------------------------------------------------------------------ #
+        best_params_path = None
+        best_max_error = float('inf')
+        best_x_aug = x0_aug.copy()
+        
+        def save_best_params(x_aug_current, max_error):
+            """Save params if this is the best (lowest max violation) so far."""
+            nonlocal best_max_error, best_x_aug, best_params_path
+            if max_error < best_max_error:
+                best_max_error = max_error
+                best_x_aug = x_aug_current.copy()
+                # Save to temp file
+                temp_dir = tempfile.gettempdir()
+                best_params_path = os.path.join(temp_dir, "ccsa_best_params.npy")
+                np.save(best_params_path, best_x_aug)
+                return True
+            return False
+        
+        # ------------------------------------------------------------------ #
+        #  Test evaluation function (on full test_loader)                    #
+        # ------------------------------------------------------------------ #
+        def _eval_on_test_set(x_aug_current):
+            """Evaluate constraints on full test set. Return max class error."""
+            if test_loader is None:
+                return None
+            
+            unpack(x_aug_current[:n_theta], params, shapes, sizes)
+            
+            model.eval()
+            ce = torch.nn.CrossEntropyLoss(reduction="none")
+            
+            mean_losses = {}
+            with torch.no_grad():
+                for data, target in test_loader:
+                    data, target = data.to(device), target.to(device)
+                    losses = ce(model(data), target)
+                    
+                    for k in range(num_classes):
+                        mask = target == k
+                        if mask.any():
+                            if k not in mean_losses:
+                                mean_losses[k] = []
+                            mean_losses[k].extend(losses[mask].cpu().numpy().tolist())
+            
+            # Compute averages
+            avg_losses = {k: float(np.mean(v)) if v else 0.0 for k, v in mean_losses.items()}
+            max_class_error = max(avg_losses.values()) if avg_losses else 0.0
+            
+            return avg_losses, max_class_error
+        
+        # ------------------------------------------------------------------ #
+        #  Enhanced diagnostic printer with test set evaluation              #
+        # ------------------------------------------------------------------ #
+        def _print_step_diagnostics_with_test(step: int, t_val: float, x_aug_current=None):
+            """Print training batch diagnostics + test set evaluation."""
+            # Print training batch (existing behavior)
+            if current_batch is None:
+                return
+    
+            data, target = current_batch
+            model.eval()
+            ce = torch.nn.CrossEntropyLoss(reduction="none")
+            with torch.no_grad():
+                losses = ce(model(data), target)
+    
+            mean_losses = {}
+            for k in range(num_classes):
+                mask = target == k
+                if mask.any():
+                    mean_losses[k] = losses[mask].mean().item()
+    
+            violations = {k: v - t_val for k, v in mean_losses.items() if v - t_val > 0}
+            max_viol   = max(violations.values()) if violations else 0.0
+    
+            '''lines = [
+                f"\n{'─'*62}",
+                f"[STEP DIAGNOSTIC TEST] ",
+                f"  step {step:>5d} | t = {t_val:.6f} | "
+                f"violated = {len(violations)}/{len(mean_losses)}  "
+                f"max_viol = {max_viol:+.6f}",
+                f"  {'cls':>4}  {'mean_loss':>10}  {'gk - t':>10}  {'status'}",
+                f"  {'─'*4}  {'─'*10}  {'─'*10}  {'─'*8}",
+            ]
+            for k in sorted(mean_losses.keys()):
+                gk  = mean_losses[k]
+                val = gk - t_val
+                flag = "VIOLATED" if val > 0 else "ok"
+                lines.append(f"  {k:>4}  {gk:>10.6f}  {val:>+10.6f}  {flag}")
+            lines.append(f"{'─'*62}")
+            print("\n".join(lines))'''
+            
+            # Evaluate on full test set every 10 steps
+            if test_loader is not None and x_aug_current is not None:
+                test_result = _eval_on_test_set(x_aug_current)
+                if test_result is not None:
+                    test_losses, test_max_class_error = test_result
+                    
+                    # Check if this is the best so far
+                    is_best = save_best_params(x_aug_current, test_max_class_error)
+                    if is_best:
+                        print(f"  ★ NEW BEST max test error: {test_max_class_error:.6f}")
     
         # ------------------------------------------------------------------ #
         #  CCSA kwargs                                                         #
@@ -594,6 +688,23 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
                     )
                     # Full constraint table at every epoch regardless of print_every
                     _print_step_diagnostics(step=outer_calls, t_val=t_val)
+
+                if print_every > 0 and outer_calls % print_every == 0:
+                    # Access dual variables from CCSA optimizer
+                    y_k = getattr(ccsa_opt, '_last_y_opt', None)
+                    if y_k is not None:
+                        y_sum  = float(np.sum(y_k))
+                        v_t    = 1.0 - y_sum          # direction of t step
+                        sigma_t = ccsa_opt.asym.sigma[-1] if hasattr(ccsa_opt, 'asym') else '?'
+                        rho_t   = float(ccsa_opt.rho_c[-1]) if ccsa_opt.rho_c is not None else '?'
+                        dx_t_approx = -(sigma_t**2) * v_t / max(rho_t, 1e-15) if isinstance(sigma_t, float) else '?'
+                        print(f"  [T-DEBUG] t={t_val:.6f} | "
+                            f"sum(y)={y_sum:.4f} | "
+                            f"v_t=1-sum(y)={v_t:.4f} | "
+                            f"sigma_t={sigma_t:.4e} | "
+                            f"rho_t={rho_t:.4e} | "
+                            f"dx_t≈{dx_t_approx:.6f} | "
+                            f"{'t WILL INCREASE' if v_t < 0 else 't will decrease'}")
     
                 return (t_val, g_vec)
     
@@ -711,9 +822,26 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
     
         pbar = tqdm(total=total_outer, desc="CCSA-EPI", unit="step", leave=True)
         try:
+            t_ub = t_init
             for step in range(total_outer):
                 ccsa_opt.step()
+
+                # to avoid artifacts about epigraph formulation and t being a dummy variable
+                ccsa_opt.x_k[-1] = min(float(ccsa_opt.x_k[-1]), t_ub)
+                #print(f"Step {step+1}/{total_outer} | t = {ccsa_opt.x_k[-1]:.6f} (ub={t_ub:.6f})")
+
+                t_current = float(ccsa_opt.x_k[-1])
+                pbar.postfix = f"t={t_current:.6f}"
                 pbar.update(1)
+                
+                # Print test set evaluation every step
+                if step % 10 == 0:
+                    _print_step_diagnostics_with_test(step=outer_calls, t_val=float(ccsa_opt.x_k[-1]), 
+                                                    x_aug_current=ccsa_opt.x_k)
+                    
+                t_ub = float(ccsa_opt.x_k[-1])
+               
+                
                 if outer_calls >= total_outer:
                     break
         except TrainingComplete:
@@ -722,6 +850,13 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
             pbar.close()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
+            
+            # Load and use best params at the end
+            if best_params_path is not None:
+                print(f"\n[BEST PARAMS] Loading best params with max_error={best_max_error:.6f}")
+                best_x_aug = np.load(best_params_path)
+                unpack(best_x_aug[:n_theta], params, shapes, sizes)
+                ccsa_opt.x_k = best_x_aug
     
         logs["final_cumulative_eval"] = cumulative_eval
     
