@@ -108,8 +108,10 @@ def run(args):
     with open(outdir / "run_params.json", "w") as f:
         json.dump(vars(args), f, indent=2)
 
-    optim_list = [args.opt] if args.opt else ["ccsa", "adamw"]
+    optim_list = [args.opt] if args.opt else ["ccsa_standard", "ccsa_epi",]
     all_results = {}
+
+    trained_models = {}
 
     for opt_name in optim_list:
         model = model_factory().to(device)
@@ -120,7 +122,7 @@ def run(args):
         elif opt_name == "adamw":
             optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
             use_ccsa = False
-        elif opt_name == "ccsa":
+        elif opt_name == "ccsa_epi":
             optimizer = CCSATorchOptimizer(
                 model.parameters(),
                 lr=args.lr,
@@ -137,6 +139,33 @@ def run(args):
                 'min_curv': 1e-4, 'max_curv': 10000.0}
             )
             use_ccsa = True
+
+        elif opt_name == "ccsa_standard":
+            optimizer = CCSATorchOptimizer(
+                model.parameters(),
+                lr=args.lr,
+                use_quadratic_surrogates=True,
+                conservative=False,
+                max_inner=1,
+                rho_init=1.0,
+                sigma_min=1e-2,
+                update_rule='multiplier',
+                verbose=args.verbose,
+                inner_eval_weight=0.5,
+            )
+            all_batch_losses, all_evals, logs = optimizer.optimize_training(
+                train_loader, model, criterion, device, args.epochs, test_loader=test_loader
+            )
+            # Compute per-label errors on trained model
+            per_label_error_history = {}
+            for epoch in logs.get("epoch", []):
+                per_label_error_history[epoch] = compute_per_label_avg_errors(
+                    model, train_loader, device, num_classes
+                )
+            trained_models[opt_name] = model                                         # <-- save model
+            all_results[opt_name] = (all_batch_losses, all_evals, logs, per_label_error_history)  # <-- save results
+            continue                               # <-- add
+
         else:
             raise ValueError(f"Unknown optimizer {opt_name}")
 
@@ -178,7 +207,9 @@ def run(args):
                 logs["time"].append(time.time() - t0)
 
                 # Compute per-label errors
-                per_label_errors = compute_per_label_avg_errors(model, test_loader, device, num_classes)
+                #per_label_errors = compute_per_label_avg_errors(model, test_loader, device, num_classes)
+               
+                per_label_errors = compute_per_label_avg_errors(model, train_loader, device, num_classes)
                 per_label_error_history[epoch] = per_label_errors
 
                 print(
@@ -196,10 +227,12 @@ def run(args):
             per_label_error_history = {}
             if "epoch" in logs and len(logs["epoch"]) > 0:
                 for epoch in logs["epoch"]:
-                    per_label_errors = compute_per_label_avg_errors(model, test_loader, device, num_classes)
+                    per_label_errors = compute_per_label_avg_errors(model, train_loader, device, num_classes)
                     per_label_error_history[epoch] = per_label_errors
 
         all_results[opt_name] = (all_batch_losses, all_evals, logs, per_label_error_history)
+
+        trained_models[opt_name] = model
 
     # Save the results
     save_dict = {}
@@ -223,6 +256,11 @@ def run(args):
 
     with open(outdir / "all_results.pkl", "wb") as f:
         pickle.dump(all_results, f)
+
+    # Save model weights for each optimizer
+    for opt_name, m in trained_models.items():
+        torch.save(m.state_dict(), outdir / f"model_{opt_name}.pt")
+    print(f"[INFO] Saved model weights: {[f'model_{k}.pt' for k in trained_models]}")
 
     print(f"[INFO] Saved results to {outdir}")
 
@@ -351,7 +389,7 @@ def run(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Adversarial Min-Max Training with CCSA")
     p.add_argument("--exp", choices=["mnist_cnn", "cifar10_resnet32", "cifar100_resnet56"], required=True)
-    p.add_argument("--opt", choices=["adam", "adamw", "ccsa"])
+    p.add_argument("--opt", choices=["ccsa_epi", "ccsa_standard", "adamw"])
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--batch-size", type=int, dest="batch_size", default=128)
     p.add_argument("--lr", type=float, default=1e-3)
