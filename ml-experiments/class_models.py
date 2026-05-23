@@ -1,7 +1,53 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# MNIST small CNN 
+
+# Variational Autoencoder for MNIST
+class MNIST_VAE(nn.Module):
+    def __init__(self, latent_dim: int = 20, hidden_dim: int = 400):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.fc1 = nn.Linear(784, hidden_dim)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.fc2 = nn.Linear(latent_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 784)
+
+    def encode(self, x):
+        h = F.softplus(self.fc1(x.view(x.size(0), -1)))
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        h = F.softplus(self.fc2(z))
+        return torch.sigmoid(self.fc3(h))
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        recon = self.decode(z)
+        return recon, mu, logvar
+
+    @staticmethod
+    def loss_components(recon, x, mu, logvar, reduction: str = 'mean'):
+        x_flat = x.view(x.size(0), -1)
+        # BCE summed over pixels, then averaged (or summed) over batch
+        bce = F.binary_cross_entropy(recon, x_flat, reduction='none').sum(dim=1)
+        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+        if reduction == 'mean':
+            return bce.mean(), kl.mean()
+        elif reduction == 'sum':
+            return bce.sum(), kl.sum()
+        else:
+            return bce, kl
+
+
+# MNIST small CNN
 class MNIST_CNN(nn.Module):
     def __init__(self):
         super().__init__()
