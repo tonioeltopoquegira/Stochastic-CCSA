@@ -494,7 +494,7 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
         #  Estimate a good t_init: max mean class loss on first batch          #
         # ------------------------------------------------------------------ #
     
-        t_init = 3.365
+        t_init = 0.093 #3.365
         print(f"[EPIGRAPH] t_init = {t_init:.4f}")
     
         # Augmented variable: [theta (n_theta,), t (1,)]
@@ -823,6 +823,7 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
         pbar = tqdm(total=total_outer, desc="CCSA-EPI", unit="step", leave=True)
         try:
             t_ub = t_init
+            t_negative = False
             for step in range(total_outer):
                 ccsa_opt.step()
 
@@ -830,12 +831,32 @@ class CCSATorchOptimizer(torch.optim.Optimizer):
                 ccsa_opt.x_k[-1] = min(float(ccsa_opt.x_k[-1]), t_ub)
                 #print(f"Step {step+1}/{total_outer} | t = {ccsa_opt.x_k[-1]:.6f} (ub={t_ub:.6f})")
 
+                '''if ccsa_opt.x_k[-1] < 0 or t_negative:
+                    t_negative = False
+                    # t went pathologically negative — reset to max mean class loss on current batch
+                    if current_batch is not None:
+                        data, target = current_batch
+                        model.eval()
+                        ce = torch.nn.CrossEntropyLoss(reduction="none")
+                        with torch.no_grad():
+                            losses = ce(model(data), target)
+                        mean_losses = [losses[target == k].mean().item()
+                                    for k in range(num_classes) if (target == k).any()]
+                        reset_val = max(mean_losses) if mean_losses else t_init
+                    else:
+                        reset_val = t_init
+                    print(f"[T-RESET] t={ccsa_opt.x_k[-1]:.4f} → {reset_val:.4f}")
+                    ccsa_opt.x_k[-1] = reset_val'''
+                
+
+
+
                 t_current = float(ccsa_opt.x_k[-1])
                 pbar.postfix = f"t={t_current:.6f}"
                 pbar.update(1)
                 
                 # Print test set evaluation every step
-                if step % 10 == 0:
+                if step % 20 == 0:
                     _print_step_diagnostics_with_test(step=outer_calls, t_val=float(ccsa_opt.x_k[-1]), 
                                                     x_aug_current=ccsa_opt.x_k)
                     
