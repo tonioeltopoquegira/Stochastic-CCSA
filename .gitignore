@@ -38,3 +38,5 @@ cssca_resources/
 runs_adversarial/
 
 runs_minmax/
+
+runs_vae/
