@@ -91,21 +91,50 @@ def load_run(rundir: Path, show: list[str] | None):
 
 
 # ── individual plot functions ────────────────────────────────────────────────
-def plot_batch_curves(batch, labels, outdir, log_x=False):
+def plot_batch_curves(batch, labels, outdir, log_x=False, tradeoff_filter=None):
     """Three-panel: objective / recon / KL vs cumulative evals."""
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     titles = ["objective (train batch)", "reconstruction BCE (train batch)", "KL (train batch)"]
     keys   = ["losses", "recons", "kls"]
 
-    for idx, lbl in enumerate(labels):
+    # Apply filter if provided
+    if tradeoff_filter is not None:
+        def should_include(label):
+            label_mode = None
+            for mode in tradeoff_filter.keys():
+                if mode in label:
+                    label_mode = mode
+                    break
+            if label_mode is None:
+                return False  # Exclude modes not in filter
+            config = tradeoff_filter[label_mode]
+            if isinstance(config, list):
+                for val in config:
+                    if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                        return True
+                return False
+            elif isinstance(config, dict) and "exclude_values" in config:
+                for val in config["exclude_values"]:
+                    if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                        return False
+                return True
+            return True
+        filtered_labels = [lbl for lbl in labels if should_include(lbl)]
+    else:
+        filtered_labels = labels
+
+    for idx, lbl in enumerate(filtered_labels):
         color, ls, _ = _style(lbl, idx)
         x = batch[lbl]["evals"]
+        # Adam uses forward + backward, so multiply by 2 for fair comparison
+        if lbl.startswith("adam"):
+            x = x * 2.0
         for ax, key in zip(axes, keys):
             y = batch[lbl][key]
             ax.plot(x, y, label=lbl, alpha=0.6, color=color, linestyle=ls, linewidth=1.2)
 
     for ax, title in zip(axes, titles):
-        ax.set_xlabel("cumulative weighted evals")
+        ax.set_xlabel("evals")
         ax.set_ylabel(title)
         ax.set_title(title)
         ax.set_yscale("log")
@@ -120,11 +149,37 @@ def plot_batch_curves(batch, labels, outdir, log_x=False):
     print(f"  saved {out}")
 
 
-def plot_epoch_curves(epoch, labels, outdir):
+def plot_epoch_curves(epoch, labels, outdir, tradeoff_filter=None):
     """Two-panel: val recon / val KL per epoch."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    for idx, lbl in enumerate(labels):
+    # Apply filter if provided
+    if tradeoff_filter is not None:
+        def should_include(label):
+            label_mode = None
+            for mode in tradeoff_filter.keys():
+                if mode in label:
+                    label_mode = mode
+                    break
+            if label_mode is None:
+                return False  # Exclude modes not in filter
+            config = tradeoff_filter[label_mode]
+            if isinstance(config, list):
+                for val in config:
+                    if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                        return True
+                return False
+            elif isinstance(config, dict) and "exclude_values" in config:
+                for val in config["exclude_values"]:
+                    if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                        return False
+                return True
+            return True
+        filtered_labels = [lbl for lbl in labels if should_include(lbl)]
+    else:
+        filtered_labels = labels
+
+    for idx, lbl in enumerate(filtered_labels):
         logs = epoch.get(lbl, {})
         ep = logs.get("epoch")
         if not ep:
@@ -156,55 +211,128 @@ def plot_epoch_curves(epoch, labels, outdir):
     print(f"  saved {out}")
 
 
-def plot_kl_recon_tradeoff(epoch, labels, outdir, run_params=None):
+def plot_kl_recon_tradeoff(epoch, labels, outdir, run_params=None, tradeoff_filter=None):
     """
-    KL vs recon scatter: each epoch is one point, coloured by run.
-    Square marker = first epoch, star = last epoch, line connects epochs in order.
-    Optional threshold lines if run_params is provided.
+    KL vs recon scatter: final epoch only as a point.
+    Each mode (adam_additive, ccsa_additive, ccsa_kl_constrained, ccsa_recon_constrained) 
+    has a different marker. Same beta levels share the same color.
+    
+    Parameters
+    ----------
+    tradeoff_filter : dict or None
+        Filter which runs to include. Example:
+        {
+            "ccsa_additive": ["1", "10"],
+            "ccsa_kl_constrained": ["10"],
+            "adam_additive": exclude_values=["0.1"]  # exclude specific values
+        }
     """
-    fig, ax = plt.subplots(figsize=(9, 7))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
-    for idx, lbl in enumerate(labels):
+    # Define markers by mode
+    mode_markers = {
+        "adam_additive": "o",
+        "ccsa_additive": "D",
+        "ccsa_kl_constrained": "*",
+        "ccsa_recon_constrained": "^",
+    }
+    
+    # Build filter logic
+    def should_include(label):
+        if tradeoff_filter is None:
+            return True
+        # Check which mode this label belongs to
+        label_mode = None
+        for mode in tradeoff_filter.keys():
+            if mode in label:
+                label_mode = mode
+                break
+        if label_mode is None:
+            # Mode not in filter dict, exclude it
+            return False
+        
+        config = tradeoff_filter[label_mode]
+        if isinstance(config, list):
+            # Include only these values (exact match after _b or _kl)
+            for val in config:
+                if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                    return True
+            return False
+        elif isinstance(config, dict) and "exclude_values" in config:
+            # Exclude specific values (exact match after _b or _kl)
+            for val in config["exclude_values"]:
+                if label.endswith(f"_b{val}") or label.endswith(f"_kl{val}"):
+                    return False
+            return True
+        return True
+    
+    filtered_labels = [lbl for lbl in labels if should_include(lbl)]
+    
+    # Extract unique beta/kl values for coloring
+    beta_values = set()
+    for lbl in filtered_labels:
+        # Extract beta or kl value
+        if "_b" in lbl:
+            val = lbl.split("_b")[-1]
+            beta_values.add(val)
+        elif "_kl" in lbl:
+            val = lbl.split("_kl")[-1]
+            beta_values.add(val)
+    
+    beta_values = sorted(beta_values, key=lambda x: float(x))
+    
+    # Define colors for different beta/kl values
+    colors_palette = plt.cm.tab20(np.linspace(0, 1, max(20, len(beta_values))))
+    beta_to_color = {val: colors_palette[idx] for idx, val in enumerate(beta_values)}
+    
+    for lbl in filtered_labels:
         logs = epoch.get(lbl, {})
         recons = logs.get("val_recon")
         kls    = logs.get("val_kl")
         if not recons or not kls:
             continue
-        color, ls, _ = _style(lbl, idx)
-        r = np.array(recons, dtype=np.float32)
-        k = np.array(kls,    dtype=np.float32)
-        ax.plot(r, k, linestyle="-", linewidth=1.0, alpha=0.5, color=color)
-        ax.scatter(r[0],  k[0],  marker="s", s=60,  color=color, zorder=4)   # start
-        ax.scatter(r[-1], k[-1], marker="*", s=120, color=color, zorder=5,   # end
-                   label=lbl)
+        
+        # Determine mode from label
+        mode = None
+        for m in mode_markers.keys():
+            if m in lbl:
+                mode = m
+                break
+        if mode is None:
+            mode = "ccsa_additive"  # default
+        
+        # Extract beta/kl value for color
+        beta_val = None
+        if "_b" in lbl:
+            beta_val = lbl.split("_b")[-1]
+        elif "_kl" in lbl:
+            beta_val = lbl.split("_kl")[-1]
+        
+        marker = mode_markers[mode]
+        # Use black for ccsa_kl_constrained, otherwise use beta-based coloring
+        if mode == "ccsa_kl_constrained":
+            color = "black"
+        else:
+            color = beta_to_color.get(beta_val, "black")
+        
+        # Plot only the final epoch
+        r_final = recons[-1]
+        k_final = kls[-1]
+        # Increase marker size for stars
+        size = 300 if marker == "*" else 150
+        ax.scatter(r_final, k_final, marker=marker, s=size, color=color, 
+                   zorder=5, label=lbl, edgecolors='black', linewidth=0.5)
 
-    if run_params:
-        kl_thr    = run_params.get("kl_threshold")
-        recon_thr = run_params.get("recon_threshold")
-        if isinstance(kl_thr, list):
-            for v in kl_thr:
-                ax.axhline(v, color="gray", linestyle="--", linewidth=0.9,
-                           label=f"KL ≤ {v}")
-        elif kl_thr is not None:
-            ax.axhline(kl_thr, color="gray", linestyle="--", linewidth=0.9,
-                       label=f"KL ≤ {kl_thr}")
-        if isinstance(recon_thr, list):
-            for v in recon_thr:
-                ax.axvline(v, color="silver", linestyle="-.", linewidth=0.9,
-                           label=f"recon ≤ {v}")
-        elif recon_thr is not None:
-            ax.axvline(recon_thr, color="silver", linestyle="-.", linewidth=0.9,
-                       label=f"recon ≤ {recon_thr}")
-
-    ax.set_xlabel("val reconstruction BCE")
-    ax.set_ylabel("val KL divergence")
-    ax.set_title("KL–reconstruction tradeoff  (■=start  ★=end)")
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.legend(fontsize=7, ncol=max(1, len(labels)//8))
-    ax.grid(True, alpha=0.3, which="both")
+    ax.set_xlabel("val reconstruction BCE", fontsize=12)
+    ax.set_ylabel("val KL divergence", fontsize=12)
+    ax.set_title("KL–reconstruction tradeoff (final epoch)", fontsize=13, fontweight='bold')
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend(fontsize=8, loc='best', frameon=True)
     plt.tight_layout()
     out = outdir / "vae_kl_recon_tradeoff.png"
-    plt.savefig(out, dpi=150); plt.close()
+    plt.savefig(out, dpi=150)
+    plt.close()
     print(f"  saved {out}")
 
 
@@ -241,6 +369,9 @@ def main():
                    help="where to save plots (default: same as --rundir)")
     p.add_argument("--log-x", action="store_true",
                    help="also log-scale the x-axis on batch-curve plots")
+    p.add_argument("--tradeoff-filter", default=None,
+                   help="JSON string to filter tradeoff plot. e.g. '{\"ccsa_additive\": [\"1\", \"10\"], "
+                        "\"ccsa_kl_constrained\": [\"10\"], \"adam_additive\": {\"exclude_values\": [\"0.1\"]}}'")
     args = p.parse_args()
 
     rundir = Path(args.rundir)
@@ -257,9 +388,17 @@ def main():
         with open(rp_path) as f:
             run_params = json.load(f)
 
-    plot_batch_curves(batch, labels, outdir, log_x=args.log_x)
-    plot_epoch_curves(epoch, labels, outdir)
-    plot_kl_recon_tradeoff(epoch, labels, outdir, run_params=run_params)
+    # Parse tradeoff filter if provided
+    tradeoff_filter = None
+    if args.tradeoff_filter:
+        try:
+            tradeoff_filter = json.loads(args.tradeoff_filter)
+        except json.JSONDecodeError as e:
+            print(f"[WARNING] Failed to parse --tradeoff-filter: {e}")
+
+    plot_batch_curves(batch, labels, outdir, log_x=args.log_x, tradeoff_filter=tradeoff_filter)
+    plot_epoch_curves(epoch, labels, outdir, tradeoff_filter=tradeoff_filter)
+    plot_kl_recon_tradeoff(epoch, labels, outdir, run_params=run_params, tradeoff_filter=tradeoff_filter)
     print_summary(epoch, labels)
     print(f"[replot] done → {outdir}")
 
