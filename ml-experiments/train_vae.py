@@ -117,6 +117,10 @@ def run_adam(model, train_loader, test_loader, device, args, outdir: Path,
             logs["best_epoch"].append(epoch)
             logs["best_val_loss"].append(best_val_loss)
 
+    last_state_dict = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    torch.save(last_state_dict, outdir / f"last_{label}.pt")
+    print(f"[{label}] Saved last checkpoint (final weights) -> last_{label}.pt")
+
     if best_state_dict is not None:
         model.load_state_dict({k: v.to(device) for k, v in best_state_dict.items()})
         print(f"[{label}] Restored best checkpoint (epoch {logs['best_epoch'][-1]}, "
@@ -162,16 +166,23 @@ def run_ccsa(model, train_loader, test_loader, device, args, mode: str, outdir: 
         "cumulative_eval": 0.0,
     }
 
-    # Best-checkpoint tracking (metric: val_recon + val_kl, beta=1, same for all modes)
     best_val_loss = float('inf')
     best_state_dict = None
+    best_feasible_val_loss = float('inf')
+    best_feasible_state_dict = None
+    min_violation = float('inf')
+    min_violation_state_dict = None
     ckpt_path = outdir / f"best_{tag}.pt"
+    feasible_ckpt_path = outdir / f"best_feasible_{tag}.pt"
+    min_viol_ckpt_path = outdir / f"min_violation_{tag}.pt"
 
     batch_losses, batch_recons, batch_kls = [], [], []
     cumulative_evals_trace = []
     logs = {"epoch": [], "train_total": [], "train_recon": [], "train_kl": [],
             "val_total": [], "val_recon": [], "val_kl": [], "time": [],
-            "best_step": [], "best_val_loss": []}
+            "best_step": [], "best_val_loss": [],
+            "best_feasible_step": [], "best_feasible_val_loss": [],
+            "min_violation_step": [], "min_violation": []}
     t0 = time.time()
 
     def _fetch_new_batch():
@@ -209,6 +220,8 @@ def run_ccsa(model, train_loader, test_loader, device, args, mode: str, outdir: 
 
     def _maybe_checkpoint():
         nonlocal best_val_loss, best_state_dict
+        nonlocal best_feasible_val_loss, best_feasible_state_dict
+        nonlocal min_violation, min_violation_state_dict
         ckpt_every = getattr(args, 'checkpoint_every', 50)
         ckpt_warmup = getattr(args, 'checkpoint_warmup', 200)
         if state["outer_calls"] % ckpt_every != 0:
@@ -226,16 +239,59 @@ def run_ccsa(model, train_loader, test_loader, device, args, mode: str, outdir: 
         elif mode == "recon_constrained":
             tracked = val_kl
             tracked_label = f"kl={tracked:.4f}"
-        improved = tracked < best_val_loss
-        if improved:
+        improved_overall = tracked < best_val_loss
+        # For constrained modes, compute violation = max(g, 0) so 0 means feasible
+        # and larger values indicate how far outside the feasible set we are.
+        feasible = True
+        violation = 0.0
+        if mode == "kl_constrained":
+            violation = max(0.0, val_kl - args.kl_threshold)
+            feasible = (violation == 0.0)
+        elif mode == "recon_constrained":
+            violation = max(0.0, val_recon - args.recon_threshold)
+            feasible = (violation == 0.0)
+
+        improved_feasible = feasible and (tracked < best_feasible_val_loss)
+        improved_min_viol = (mode in ("kl_constrained", "recon_constrained")
+                             and violation < min_violation)
+
+        if improved_overall:
             best_val_loss = tracked
             best_state_dict = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             torch.save(best_state_dict, ckpt_path)
             logs["best_step"].append(state["outer_calls"])
             logs["best_val_loss"].append(best_val_loss)
-            print(f"  [{tag}] step {state['outer_calls']:5d} ✓ new best  "
+
+        if improved_feasible:
+            best_feasible_val_loss = tracked
+            best_feasible_state_dict = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            torch.save(best_feasible_state_dict, feasible_ckpt_path)
+            logs["best_feasible_step"].append(state["outer_calls"])
+            logs["best_feasible_val_loss"].append(best_feasible_val_loss)
+
+        if improved_min_viol:
+            min_violation = violation
+            min_violation_state_dict = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            torch.save(min_violation_state_dict, min_viol_ckpt_path)
+            logs["min_violation_step"].append(state["outer_calls"])
+            logs["min_violation"].append(min_violation)
+
+        if improved_overall and feasible:
+            print(f"  [{tag}] step {state['outer_calls']:5d} ✓ new best (feasible)  "
                   f"val recon={val_recon:.2f}  kl={val_kl:.4f}  "
-                  f"{tracked_label}  → saved {ckpt_path.name}")
+                  f"{tracked_label}  → saved {feasible_ckpt_path.name if improved_feasible else ckpt_path.name}")
+        elif improved_overall and not feasible:
+            print(f"  [{tag}] step {state['outer_calls']:5d} ✓ new best overall but INFEASIBLE  "
+                  f"val recon={val_recon:.2f}  kl={val_kl:.4f}  "
+                  f"{tracked_label}  viol={violation:.4f}  → saved {ckpt_path.name}")
+        elif improved_feasible:
+            print(f"  [{tag}] step {state['outer_calls']:5d} ✓ new best feasible  "
+                  f"val recon={val_recon:.2f}  kl={val_kl:.4f}  "
+                  f"{tracked_label}  → saved {feasible_ckpt_path.name}")
+        elif improved_min_viol:
+            print(f"  [{tag}] step {state['outer_calls']:5d} ✓ new min violation  "
+                  f"val recon={val_recon:.2f}  kl={val_kl:.4f}  "
+                  f"viol={violation:.4f}  → saved {min_viol_ckpt_path.name}")
         else:
             print(f"  [{tag}] step {state['outer_calls']:5d}   "
                   f"val recon={val_recon:.2f}  kl={val_kl:.4f}  "
@@ -369,12 +425,33 @@ def run_ccsa(model, train_loader, test_loader, device, args, mode: str, outdir: 
 
     unpack_to_params(ccsa_opt.x_k, params, shapes, sizes)
 
-    # Restore best checkpoint into model
-    if best_state_dict is not None:
-        model.load_state_dict({k: v.to(device) for k, v in best_state_dict.items()})
-        print(f"[{tag}] Restored best checkpoint (val combined={best_val_loss:.2f}) from {ckpt_path.name}")
+
+    if best_feasible_state_dict is not None:
+        restored_state = best_feasible_state_dict
+        restored_kind = "feasible"
+        restored_name = feasible_ckpt_path.name
+        restored_metric = best_feasible_val_loss
+    elif min_violation_state_dict is not None:
+        restored_state = min_violation_state_dict
+        restored_kind = f"min-violation (viol={min_violation:.4f})"
+        restored_name = min_viol_ckpt_path.name
+        restored_metric = best_val_loss
     else:
-        print(f"[{tag}] No checkpoint saved — using final weights.")
+        restored_state = best_state_dict
+        restored_kind = "overall"
+        restored_name = ckpt_path.name
+        restored_metric = best_val_loss
+
+
+    last_state_dict = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    torch.save(last_state_dict, outdir / f"last_{tag}.pt")
+    print(f"[{tag}] Saved last checkpoint (final weights) -> last_{tag}.pt")
+
+    if restored_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in restored_state.items()})
+        print(f"[{tag}] Restored checkpoint ({restored_kind}; val combined={restored_metric:.2f}) from {restored_name}")
+    else:
+        print(f"[{tag}] No checkpoint saved -- using final weights.")
 
     return batch_losses, batch_recons, batch_kls, cumulative_evals_trace, logs
 
@@ -382,13 +459,43 @@ def run_ccsa(model, train_loader, test_loader, device, args, mode: str, outdir: 
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
-def make_plots(all_results, outdir: Path, exp: str):
+def make_plots(all_results, outdir: Path, exp: str, adam_groups: dict = None):
+    adam_groups = adam_groups or {}
+    # Build set of labels that are part of a group (plotted aggregated, not individually)
+    grouped_labels = {lbl for members in adam_groups.values() for lbl in members}
+
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    color_idx = 0
+
+    # Plot aggregated adam groups as mean ± std bands
+    for group_name, members in adam_groups.items():
+        color = colors[color_idx % len(colors)]
+        color_idx += 1
+        all_losses = [np.array(all_results[m][0], dtype=np.float32) for m in members if m in all_results]
+        all_recons = [np.array(all_results[m][1], dtype=np.float32) for m in members if m in all_results]
+        all_kls    = [np.array(all_results[m][2], dtype=np.float32) for m in members if m in all_results]
+        x = np.array(all_results[members[0]][3], dtype=np.float32)
+        min_len = min(len(a) for a in all_losses)
+        x = x[:min_len]
+        for arr_list, ax in zip([all_losses, all_recons, all_kls], axes):
+            mat = np.stack([a[:min_len] for a in arr_list], axis=0)
+            mean = mat.mean(axis=0)
+            std  = mat.std(axis=0)
+            ax.plot(x, mean, label=group_name, alpha=0.9, color=color)
+            ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
+
+    # Plot standalone runs
     for mode_name, (losses, recons, kls, evals, _logs) in all_results.items():
+        if mode_name in grouped_labels:
+            continue
+        color = colors[color_idx % len(colors)]
+        color_idx += 1
         x = np.array(evals, dtype=np.float32)
-        axes[0].plot(x, np.array(losses, dtype=np.float32), label=mode_name, alpha=0.7)
-        axes[1].plot(x, np.array(recons, dtype=np.float32), label=mode_name, alpha=0.7)
-        axes[2].plot(x, np.array(kls, dtype=np.float32), label=mode_name, alpha=0.7)
+        axes[0].plot(x, np.array(losses, dtype=np.float32), label=mode_name, alpha=0.7, color=color)
+        axes[1].plot(x, np.array(recons, dtype=np.float32), label=mode_name, alpha=0.7, color=color)
+        axes[2].plot(x, np.array(kls,    dtype=np.float32), label=mode_name, alpha=0.7, color=color)
+
     for ax, title in zip(axes, ["objective", "reconstruction (BCE)", "KL"]):
         ax.set_xlabel("cumulative weighted evals")
         ax.set_ylabel(title)
@@ -400,12 +507,33 @@ def make_plots(all_results, outdir: Path, exp: str):
     plt.close()
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    for mode_name, (_l, _r, _k, _e, logs) in all_results.items():
-        if not logs["epoch"]:
+    color_idx = 0
+
+    # Epoch plots: aggregated adam groups
+    for group_name, members in adam_groups.items():
+        color = colors[color_idx % len(colors)]
+        color_idx += 1
+        valid = [m for m in members if m in all_results and all_results[m][4]["epoch"]]
+        if not valid:
             continue
+        ep = np.array(all_results[valid[0]][4]["epoch"], dtype=np.float32)
+        min_ep = min(len(all_results[m][4]["epoch"]) for m in valid)
+        ep = ep[:min_ep]
+        for key, ax in [("val_recon", axes[0]), ("val_kl", axes[1])]:
+            mat = np.stack([np.array(all_results[m][4][key], dtype=np.float32)[:min_ep] for m in valid], axis=0)
+            mean = mat.mean(axis=0); std = mat.std(axis=0)
+            ax.plot(ep, mean, marker='o', label=group_name, color=color)
+            ax.fill_between(ep, mean - std, mean + std, alpha=0.2, color=color)
+
+    for mode_name, (_l, _r, _k, _e, logs) in all_results.items():
+        if mode_name in grouped_labels or not logs["epoch"]:
+            continue
+        color = colors[color_idx % len(colors)]
+        color_idx += 1
         ep = np.array(logs["epoch"], dtype=np.float32)
-        axes[0].plot(ep, np.array(logs["val_recon"], dtype=np.float32), marker='o', label=mode_name)
-        axes[1].plot(ep, np.array(logs["val_kl"], dtype=np.float32), marker='o', label=mode_name)
+        axes[0].plot(ep, np.array(logs["val_recon"], dtype=np.float32), marker='o', label=mode_name, color=color)
+        axes[1].plot(ep, np.array(logs["val_kl"],    dtype=np.float32), marker='o', label=mode_name, color=color)
+
     axes[0].set_xlabel("epoch"); axes[0].set_ylabel("val reconstruction BCE")
     axes[0].set_title("Val recon per epoch"); axes[0].legend(); axes[0].grid(True, alpha=0.3)
     axes[1].set_xlabel("epoch"); axes[1].set_ylabel("val KL")
@@ -457,7 +585,8 @@ def run(args):
     def _label(base, suffix):
         return f"{base}_{suffix}" if suffix else base
 
-    runs = []   # (label, base_mode, run_args)
+    runs = []        # (label, base_mode, run_args)
+    adam_groups = {} # group_name -> [label, ...] for adam seed runs
     for base_mode in base_modes:
         if base_mode in ("adam_additive", "ccsa_additive"):
             multi = len(args.beta) > 1
@@ -465,7 +594,16 @@ def run(args):
                 ra = copy.copy(args)
                 ra.beta = beta
                 lbl = _label(base_mode, f"b{beta:g}" if multi else "")
-                runs.append((lbl, base_mode, ra))
+                if base_mode == "adam_additive" and args.adam_seed is not None:
+                    seeds = [args.adam_seed + i for i in range(5)]
+                    for seed in seeds:
+                        seed_ra = copy.copy(ra)
+                        seed_ra.seed = seed
+                        seed_lbl = f"{lbl}_s{seed}"
+                        runs.append((seed_lbl, base_mode, seed_ra))
+                        adam_groups.setdefault(lbl, []).append(seed_lbl)
+                else:
+                    runs.append((lbl, base_mode, ra))
         elif base_mode == "ccsa_kl_constrained":
             multi = len(args.kl_threshold) > 1
             for thr in args.kl_threshold:
@@ -547,11 +685,12 @@ def run(args):
         torch.save(m.state_dict(), outdir / f"model_{label}.pt")
         save_reconstructions(m, test_loader, device, outdir, tag=label)
 
-    make_plots(all_results, outdir, exp="mnist_vae")
+    make_plots(all_results, outdir, exp="mnist_vae", adam_groups=adam_groups)
 
     # ------------------------------------------------------------------
     # Final summary .txt — re-evaluate best-restored model for each run
     # ------------------------------------------------------------------
+    grouped_labels = {lbl for members in adam_groups.values() for lbl in members}
     col = max(30, max(len(lbl) for lbl, *_ in runs) + 2)
     sep = "-" * (col + 48)
     lines = []
@@ -562,7 +701,44 @@ def run(args):
     lines.append("=" * (col + 48))
     lines.append(f"{'run':<{col}}  {'TRAIN recon':>12}  {'TRAIN kl':>10}  {'VAL recon':>10}  {'VAL kl':>8}")
     lines.append(sep)
+
+    # Aggregated rows for adam seed groups (mean ± std)
+    for group_name, members in adam_groups.items():
+        ra = run_args_map[members[0]]
+        tr_recons, tr_kls, va_recons, va_kls = [], [], [], []
+        for lbl in members:
+            if lbl not in trained_models:
+                continue
+            _, tr_r, tr_k = evaluate_vae(trained_models[lbl], train_loader, device, beta=ra.beta)
+            _, va_r, va_k = evaluate_vae(trained_models[lbl], test_loader,  device, beta=ra.beta)
+            tr_recons.append(tr_r); tr_kls.append(tr_k)
+            va_recons.append(va_r); va_kls.append(va_k)
+        if not tr_recons:
+            continue
+        tr_r_m, tr_r_s = np.mean(tr_recons), np.std(tr_recons)
+        tr_k_m, tr_k_s = np.mean(tr_kls),   np.std(tr_kls)
+        va_r_m, va_r_s = np.mean(va_recons), np.std(va_recons)
+        va_k_m, va_k_s = np.mean(va_kls),   np.std(va_kls)
+        lines.append(
+            f"{group_name + ' (mean±std)':<{col}}"
+            f"  {tr_r_m:>6.2f}±{tr_r_s:<5.2f}"
+            f"  {tr_k_m:>5.4f}±{tr_k_s:<6.4f}"
+            f"  {va_r_m:>5.2f}±{va_r_s:<4.2f}"
+            f"  {va_k_m:>4.4f}±{va_k_s:<6.4f}"
+        )
+        for lbl in members:
+            if lbl not in trained_models:
+                continue
+            _, tr_r, tr_k = evaluate_vae(trained_models[lbl], train_loader, device, beta=ra.beta)
+            _, va_r, va_k = evaluate_vae(trained_models[lbl], test_loader,  device, beta=ra.beta)
+            lines.append(
+                f"  {lbl:<{col-2}}  {tr_r:>12.3f}  {tr_k:>10.4f}  {va_r:>10.3f}  {va_k:>8.4f}"
+            )
+
+    # Standalone runs
     for label, m in trained_models.items():
+        if label in grouped_labels:
+            continue
         ra = run_args_map[label]
         _, tr_recon, tr_kl = evaluate_vae(m, train_loader, device, beta=ra.beta)
         _, va_recon, va_kl = evaluate_vae(m, test_loader,  device, beta=ra.beta)
@@ -608,6 +784,10 @@ if __name__ == "__main__":
                    help="skip checkpointing for the first N outer steps (avoids saving on uninformative init)")
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--adam-seed", type=int, default=None, dest="adam_seed",
+                   help="if set, run adam_additive with 5 seeds starting at this value "
+                        "(seeds: adam_seed, adam_seed+1, ..., adam_seed+4); "
+                        "results are shown as mean±std distributions")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--outdir", type=str, default="./runs_vae")
     args = p.parse_args()

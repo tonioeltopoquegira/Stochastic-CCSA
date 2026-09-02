@@ -5,9 +5,9 @@ from dataclasses import dataclass
 class MMA_RhoParams:
     softening: float = 0.5       # additive softening factor
     min_growth: float = 1.01     # multiplicative bump per iteration
-    max_multiplier: float = 5.0  # max factor rho can grow per inner step
-    decay: float = 0.99          # multiplicative decay per outer iteration for rho (objective) # best 0.4
-    decay_c: float = 0.3    # multiplicative decay per outer iteration for rho_c (constraints)
+    max_multiplier: float = 2.5  # max factor rho can grow per inner step
+    decay: float = 0.995          # multiplicative decay per outer iteration for rho (objective) # best 0.4
+    decay_c: float = 0.6    # multiplicative decay per outer iteration for rho_c (constraints)
                                  # If None, uses same value as decay
 
 @dataclass
